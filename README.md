@@ -28,7 +28,7 @@ To run in headless mode, execute `export MUJOCO_GL='osmesa'` in the Docker conta
 ## Setup
 
 - Python 3.10
-- Install [PyTorch](https://pytorch.org/get-started/locally/) (torch and torchvision). Code developed with torch==1.13.1 and torchvision==0.14.0, but also tested with torch==2.2.0.
+- Install [PyTorch](https://pytorch.org/get-started/locally/) (torch and torchvision). Code developed with several versions of Pytorch, with the latest being torch==2.4.1, but should work with other recent version.
 - Install [other dependencies](requirements.txt): `pip install -r requirements.txt`
 - Warning: Atari ROMs will be downloaded with the dependencies, which means that you acknowledge that you have the license to use them.
 
@@ -38,7 +38,7 @@ To run in headless mode, execute `export MUJOCO_GL='osmesa'` in the Docker conta
 python src/main.py benchmark=atari env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0 wandb.mode=online
 ```
 
-To run other benchmarks use `benchmark=dmc` for DeepMind Control Suite or `benchmark=bigym` for BiGym.
+To run other benchmarks use `benchmark=dmc` for DeepMind Control Suite or `benchmark=craftax` for Craftax.
 By default, the logs are synced to [weights & biases](https://wandb.ai), set `wandb.mode=disabled` to turn it off 
 or `wandb.mode=offline` for offline logging.
 
