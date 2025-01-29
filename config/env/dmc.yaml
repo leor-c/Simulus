@@ -1,0 +1,9 @@
+train:
+  _target_: envs.make_dm_control
+  id: "walker-run"
+
+test:
+  _target_: ${..train._target_}
+  id: ${..train.id}
+
+keymap: minihack/${.train.id}

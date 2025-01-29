@@ -1,0 +1,18 @@
+retnet:
+  _target_: models.RetNetConfig
+  max_blocks: 20
+  num_layers: 10
+  num_heads: 3
+  embed_dim: 192
+  dropout: 0.1
+  blocks_per_chunk: 20
+  mask_type: 'autoregressive'
+  decay_scale_min_num_blocks: 2
+  decay_scale_max_num_blocks: 2
+context_length: 1
+compute_states_parallel: True
+shared_embeddings: False
+obs_emb_dim: 256
+shared_prediction_token: False
+tokenize_actions: True
+enable_curiosity: True

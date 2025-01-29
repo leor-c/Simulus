@@ -1,0 +1,22 @@
+services:
+  rem:
+    build: ./
+    container_name: rem_c
+    environment:
+      - DISPLAY=$DISPLAY
+    shm_size: '8gb'
+    volumes:
+      - .:/REM
+#      - ./rem-outputs:/REM/outputs
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    stdin_open: true # docker run -i
+    tty: true        # docker run -t
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+#              device_ids: ['0']
+              count: all
+#volumes:
+#  rem-outputs:

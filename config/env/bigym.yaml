@@ -1,0 +1,12 @@
+train:
+  _target_: envs.make_bigym
+  id: "wall_cupboard_close"
+  max_episode_steps: 400
+  headless: True
+
+test:
+  _target_: ${..train._target_}
+  id: ${..train.id}
+  max_episode_steps: ${..train.max_episode_steps}
+
+keymap: bigym/${.train.id}
