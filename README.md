@@ -1,5 +1,7 @@
 # M3: A Modular World Model over Streams of Tokens
 
+The weights of our trained models are available through this [link]() (Soon!)
+
 ## Docker
 We provide a Dockerfile for building a docker image and running the code in a docker container.
 To use docker with GPUs, make sure to install the `nvidia-container-toolkit` ([link](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)) on the host machine.
