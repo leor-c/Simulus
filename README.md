@@ -6,29 +6,29 @@ Lior Cohen, Kaixin Wang, Bingyi Kang, Uri Gadot, Shie Mannor
 🧠 Trained model weights: [In our HuggingFace page](https://huggingface.co/leorc/M3).
 
 <video width="160" height="224" controls>
-  <source src="media/Kangaroo.mp4" type="video/mp4">
+  <source src="https://github.com/leor-c/M3/blob/main/media/Kangaroo.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 <video width="160" height="224" controls>
-  <source src="media/DemonAttack.mp4" type="video/mp4">
+  <source src="https://github.com/leor-c/M3/blob/main/media/DemonAttack.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 <video width="160" height="224" controls>
-  <source src="media/Breakout.mp4" type="video/mp4">
+  <source src="https://github.com/leor-c/M3/blob/main/media/Breakout.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 <video width="160" height="224" controls>
-  <source src="media/UpNDown-75k.mp4" type="video/mp4">
+  <source src="https://github.com/leor-c/M3/blob/main/media/UpNDown-75k.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 <video width="160" height="224" controls>
-  <source src="media/KungFuMaster.mp4" type="video/mp4">
+  <source src="https://github.com/leor-c/M3/blob/main/media/KungFuMaster.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 
 
 <video width="352" height=" 416" controls>
-  <source src="media/Craftax.mp4" type="video/mp4">
+  <source src="https://github.com/leor-c/M3/blob/main/media/Craftax.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 
