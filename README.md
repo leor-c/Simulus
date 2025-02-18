@@ -1,4 +1,4 @@
-# M3: A Modular World Model over Streams of Tokens
+# M<sup>3</sup>: A Modular World Model over Streams of Tokens
 Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Mannor
 
 
