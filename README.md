@@ -1,36 +1,26 @@
 # M3: A Modular World Model over Streams of Tokens
-Lior Cohen, Kaixin Wang, Bingyi Kang, Uri Gadot, Shie Mannor
-
-📄 Paper: https://arxiv.org/abs/2502.11537
-
-🧠 Trained model weights: [In our HuggingFace page](https://huggingface.co/leorc/M3).
-
-<video width="160" height="224" controls>
-  <source src="https://github.com/leor-c/M3/blob/main/media/Kangaroo.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
-<video width="160" height="224" controls>
-  <source src="https://github.com/leor-c/M3/blob/main/media/DemonAttack.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
-<video width="160" height="224" controls>
-  <source src="https://github.com/leor-c/M3/blob/main/media/Breakout.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
-<video width="160" height="224" controls>
-  <source src="https://github.com/leor-c/M3/blob/main/media/UpNDown-75k.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
-<video width="160" height="224" controls>
-  <source src="https://github.com/leor-c/M3/blob/main/media/KungFuMaster.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Mannor
 
 
-<video width="352" height=" 416" controls>
-  <source src="https://github.com/leor-c/M3/blob/main/media/Craftax.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+📄 [Paper](https://arxiv.org/abs/2502.11537)   ▪️   🧠 [Trained model weights](https://huggingface.co/leorc/M3)
+
+
+
+<div align="center">
+<img src="https://github.com/user-attachments/assets/14734453-38dd-4bc0-a2e0-349e4eec37a2" height="250" />
+<img src="https://github.com/user-attachments/assets/11beac5f-f8ee-48a7-94ec-2130087ed060" height="250" />
+<img src="https://github.com/user-attachments/assets/a7e89c77-754f-43e3-982c-423c1257846c" height="250" />
+<img src="https://github.com/user-attachments/assets/2ae2791a-9aec-4649-88ad-56e9840cd6b1" height="250" />
+<img src="https://github.com/user-attachments/assets/2d5f9c98-2468-4206-95ac-e4d370798d7e" height="250" />
+</div>
+
+<div align="center">
+<img src="https://github.com/user-attachments/assets/06471979-367a-4253-a554-9a543f630b46" height="300" />
+</div>
+
+
+
+
 
 
 ## Docker
