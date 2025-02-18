@@ -72,7 +72,10 @@ class RunMetadata:
 
 
 def build_agent(env, cfg, device):
-    project_root = Path(hydra.utils.get_original_cwd())
+    try:
+        project_root = Path(hydra.utils.get_original_cwd())
+    except ValueError:
+        project_root = Path.cwd().parent
     is_continuous_env = isinstance(env.action_space, gymnasium.spaces.Box)
 
     tokenizers = {}
