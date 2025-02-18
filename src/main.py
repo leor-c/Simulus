@@ -71,6 +71,118 @@ class RunMetadata:
         }
 
 
+def build_agent(env, cfg, device):
+    project_root = Path(hydra.utils.get_original_cwd())
+    is_continuous_env = isinstance(env.action_space, gymnasium.spaces.Box)
+
+    tokenizers = {}
+    ac_encoders = {}
+    if hasattr(cfg.tokenizer, 'image'):
+        vgg_lpips_rel_path = cfg.tokenizer.image.vgg_lpips_ckpt_path
+        cfg.tokenizer.image.vgg_lpips_ckpt_path = (project_root / vgg_lpips_rel_path).absolute()
+        tokenizers[ObsModality.image] = instantiate(cfg.tokenizer.image)
+        tokenizers[ObsModality.image].compile()
+
+        ac_encoders[ObsModality.image] = ImageLatentObsEncoder(
+            tokens_per_obs=tokenizers[ObsModality.image].tokens_per_obs,
+            embed_dim=cfg.tokenizer.image.embed_dim,
+            num_layers=cfg.actor_critic.num_layers,
+            device=device,
+        )
+
+    if hasattr(cfg.tokenizer, 'vector'):
+        obs_dim = env.observation_space[ObsModality.vector].shape[0]
+        tokenizers[ObsModality.vector] = instantiate(cfg.tokenizer.vector, input_dim=obs_dim)
+
+        ac_encoders[ObsModality.vector] = VectorObsEncoder(
+            obs_dim=obs_dim,
+            device=device,
+        )
+
+    if ObsModality.token in env.modalities:
+        nvec = env.observation_space[ObsModality.token].nvec
+        tokenizers[ObsModality.token] = DummyTokenizer(nvec=nvec)
+
+        ac_encoders[ObsModality.token] = TokenObsEncoder(
+            nvec=nvec,
+            embed_dim=cfg.actor_critic.tokens_embed_dim,
+            device=device
+        )
+
+    if ObsModality.token_2d in env.modalities:
+        nvec = env.observation_space[ObsModality.token_2d].nvec
+        tokenizers[ObsModality.token_2d] = DummyTokenizer(nvec=nvec)
+
+        ac_encoders[ObsModality.token_2d] = TokenObsEncoder(
+            nvec=nvec,
+            embed_dim=cfg.actor_critic.tokens_embed_dim,
+            device=device
+        )
+
+    assert set(
+        tokenizers.keys()) == env.modalities, f"Modalities mismatch: env: {env.modalities}, tokenizers: {tokenizers.keys()}"
+    tokenizer = MultiModalTokenizer(tokenizers=tokenizers)
+
+    # Init world model + controller:
+    if is_continuous_env:
+        assert len(env.action_space.shape) == 1
+        action_dim = env.action_space.shape[0]
+        action_encoder = ContinuousActionEncoder(
+            action_dim=action_dim,
+            action_vocab_size=cfg.actor_critic.n_action_quant_levels,
+            embed_dim=cfg.world_model.retnet.embed_dim,
+            device=device,
+            tokenize_actions=cfg.world_model.tokenize_actions,
+        )
+        actor_critic = DContinuousActorCriticLS(
+            **cfg.actor_critic,
+            action_dim=action_dim,
+            obs_encoders=ac_encoders,
+            context_len=cfg.world_model.context_length,
+            device=device,
+        )
+    elif isinstance(env.action_space, gymnasium.spaces.MultiDiscrete):
+        action_encoder = MultiDiscreteActionEncoder(
+            nvec=env.action_space.nvec,
+            embed_dim=cfg.world_model.retnet.embed_dim,
+            device=device,
+        )
+        actor_critic = MultiDiscreteActorCriticLS(
+            actions_nvec=env.action_space.nvec,
+            obs_encoders=ac_encoders,
+            context_len=cfg.world_model.context_length,
+            device=device,
+            **cfg.actor_critic,
+        )
+    else:
+        assert isinstance(env.action_space, gymnasium.spaces.Discrete)
+        action_encoder = DiscreteActionEncoder(
+            num_actions=env.num_actions,
+            embed_dim=cfg.world_model.retnet.embed_dim,
+            device=device,
+        )
+        actor_critic = DiscreteActorCriticLS(
+            **cfg.actor_critic,
+            act_vocab_size=env.num_actions,
+            obs_encoders=ac_encoders,
+            context_len=cfg.world_model.context_length,
+            device=device
+        )
+
+    world_model = POPWorldModel(
+        tokens_per_obs_dict=tokenizer.tokens_per_obs_dict,
+        obs_vocab_size=tokenizer.vocab_size,
+        action_encoder=action_encoder,
+        retnet_cfg=instantiate(cfg.world_model.retnet),
+        device=device,
+        **cfg.world_model
+    )
+    world_model.compile()
+    actor_critic.compile()
+
+    return Agent(tokenizer, world_model, actor_critic)
+
+
 class Trainer:
     def __init__(self, cfg: DictConfig) -> None:
         wandb.init(
@@ -133,7 +245,11 @@ class Trainer:
         # logger.info(f"Obs space: {env.observation_space}")
         # logger.info(f"Action space size: {env.num_actions}")
 
-        self.agent = self.build_agent()
+        self.agent = build_agent(
+            env=self.train_env if self.cfg.training.should else self.test_env,
+            cfg=self.cfg,
+            device=self.device,
+        )
 
         if self.agent.tokenizer.is_trainable:
             logger.info(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
@@ -169,119 +285,6 @@ class Trainer:
 
         if cfg.common.resume:
             self.load_checkpoint()
-
-    def build_agent(self):
-        env = self.train_env if self.cfg.training.should else self.test_env
-        cfg = self.cfg
-        project_root = Path(hydra.utils.get_original_cwd())
-        is_continuous_env = isinstance(env.action_space, gymnasium.spaces.Box)
-
-        tokenizers = {}
-        ac_encoders = {}
-        if hasattr(cfg.tokenizer, 'image'):
-            vgg_lpips_rel_path = cfg.tokenizer.image.vgg_lpips_ckpt_path
-            cfg.tokenizer.image.vgg_lpips_ckpt_path = (project_root / vgg_lpips_rel_path).absolute()
-            tokenizers[ObsModality.image] = instantiate(cfg.tokenizer.image)
-            tokenizers[ObsModality.image].compile()
-
-            ac_encoders[ObsModality.image] = ImageLatentObsEncoder(
-                tokens_per_obs=tokenizers[ObsModality.image].tokens_per_obs,
-                embed_dim=cfg.tokenizer.image.embed_dim,
-                num_layers=cfg.actor_critic.num_layers,
-                device=self.device,
-            )
-
-        if hasattr(cfg.tokenizer, 'vector'):
-            obs_dim = env.observation_space[ObsModality.vector].shape[0]
-            tokenizers[ObsModality.vector] = instantiate(cfg.tokenizer.vector, input_dim=obs_dim)
-
-            ac_encoders[ObsModality.vector] = VectorObsEncoder(
-                obs_dim=obs_dim,
-                device=self.device,
-            )
-
-        if ObsModality.token in env.modalities:
-            nvec = env.observation_space[ObsModality.token].nvec
-            tokenizers[ObsModality.token] = DummyTokenizer(nvec=nvec)
-
-            ac_encoders[ObsModality.token] = TokenObsEncoder(
-                nvec=nvec,
-                embed_dim=cfg.actor_critic.tokens_embed_dim,
-                device=self.device
-            )
-
-        if ObsModality.token_2d in env.modalities:
-            nvec = env.observation_space[ObsModality.token_2d].nvec
-            tokenizers[ObsModality.token_2d] = DummyTokenizer(nvec=nvec)
-
-            ac_encoders[ObsModality.token_2d] = TokenObsEncoder(
-                nvec=nvec,
-                embed_dim=cfg.actor_critic.tokens_embed_dim,
-                device=self.device
-            )
-
-        assert set(
-            tokenizers.keys()) == env.modalities, f"Modalities mismatch: env: {env.modalities}, tokenizers: {tokenizers.keys()}"
-        tokenizer = MultiModalTokenizer(tokenizers=tokenizers)
-
-        # Init world model + controller:
-        if is_continuous_env:
-            assert len(env.action_space.shape) == 1
-            action_dim = env.action_space.shape[0]
-            action_encoder = ContinuousActionEncoder(
-                action_dim=action_dim,
-                action_vocab_size=cfg.actor_critic.n_action_quant_levels,
-                embed_dim=cfg.world_model.retnet.embed_dim,
-                device=self.device,
-                tokenize_actions=cfg.world_model.tokenize_actions,
-            )
-            actor_critic = DContinuousActorCriticLS(
-                **cfg.actor_critic,
-                action_dim=action_dim,
-                obs_encoders=ac_encoders,
-                context_len=self.cfg.world_model.context_length,
-                device=self.device,
-            )
-        elif isinstance(env.action_space, gymnasium.spaces.MultiDiscrete):
-            action_encoder = MultiDiscreteActionEncoder(
-                nvec=env.action_space.nvec,
-                embed_dim=cfg.world_model.retnet.embed_dim,
-                device=self.device,
-            )
-            actor_critic = MultiDiscreteActorCriticLS(
-                actions_nvec=env.action_space.nvec,
-                obs_encoders=ac_encoders,
-                context_len=self.cfg.world_model.context_length,
-                device=self.device,
-                **cfg.actor_critic,
-            )
-        else:
-            assert isinstance(env.action_space, gymnasium.spaces.Discrete)
-            action_encoder = DiscreteActionEncoder(
-                num_actions=env.num_actions,
-                embed_dim=cfg.world_model.retnet.embed_dim,
-                device=self.device,
-            )
-            actor_critic = DiscreteActorCriticLS(
-                **cfg.actor_critic,
-                act_vocab_size=env.num_actions,
-                obs_encoders=ac_encoders,
-                context_len=self.cfg.world_model.context_length,
-                device=self.device
-            )
-
-        world_model = POPWorldModel(
-            tokens_per_obs_dict=tokenizer.tokens_per_obs_dict,
-            obs_vocab_size=tokenizer.vocab_size,
-            action_encoder=action_encoder,
-            retnet_cfg=instantiate(cfg.world_model.retnet),
-            device=self.device,
-            **cfg.world_model
-        )
-        world_model.compile()
-        actor_critic.compile()
-
-        return Agent(tokenizer, world_model, actor_critic)
 
     def run(self) -> None:
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):

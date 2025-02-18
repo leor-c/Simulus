@@ -1,146 +1,156 @@
-from functools import partial 
+from functools import partial
 from pathlib import Path
 
-import hydra
-import loguru
+import click
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 import torch
-import gym
 
-from agent import AgentLS
+from main import build_agent
 from envs import SingleProcessEnv, POPWMEnv4Play
-from game import AgentEnv, EpisodeReplayEnv, Game, AgentTokenEnv
-from models.actor_critic import ActorCriticLS
-from models.world_model import POPRetNetWorldModel
+from game import AgentEnv, EpisodeReplayEnv, Game
+from utils.preprocessing import get_obs_processor
 
 
-def play_image_envs(cfg: DictConfig):
+def play_atari(cfg: DictConfig, mode, reconstruction_mode, header_info, fps, model_path: Path):
+    save_mode = 0
+
     device = torch.device(cfg.common.device)
-    assert cfg.mode in ('episode_replay', 'agent_in_env', 'agent_in_world_model', 'play_in_world_model')
+    assert mode in ('episode_replay', 'agent_in_env', 'agent_in_world_model', 'play_in_world_model')
 
     env_fn = partial(instantiate, config=cfg.env.test)
     test_env = SingleProcessEnv(env_fn)
 
-    if cfg.mode.startswith('agent_in_'):
+    if mode.startswith('agent_in_'):
         h, w, _ = test_env.env.unwrapped.observation_space.shape
     else:
         h, w = 64, 64
     multiplier = 800 // h
     size = [h * multiplier, w * multiplier]
 
-    if cfg.mode == 'episode_replay':
+    if mode == 'episode_replay':
         env = EpisodeReplayEnv(replay_keymap_name=cfg.env.keymap, episode_dir=Path('media/episodes'))
         keymap = 'episode_replay'
 
     else:
-        tokenizer = instantiate(cfg.tokenizer)
-        world_model = POPRetNetWorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=test_env.num_actions,
-                                          config=instantiate(cfg.world_model.retnet), **cfg.world_model)
-        actor_critic = ActorCriticLS(**cfg.actor_critic, act_vocab_size=test_env.num_actions,
-                                     token_embed_dim=cfg.tokenizer.embed_dim,
-                                     tokens_per_obs=cfg.world_model.retnet.tokens_per_block - 1,
-                                     context_len=cfg.world_model.context_length)
+        agent = build_agent(test_env, cfg, device)
+        if model_path is not None:
+            agent.load(model_path, device)
 
-        agent = AgentLS(tokenizer, world_model, actor_critic).to(device)
-        agent.load(Path('checkpoints/last.pt'), device)
-
-        if cfg.mode == 'play_in_world_model':
+        if mode == 'play_in_world_model':
             env = POPWMEnv4Play(tokenizer=agent.tokenizer, world_model=agent.world_model, device=device,
                                 env=env_fn())
             keymap = cfg.env.keymap
 
-        elif cfg.mode == 'agent_in_env':
-            env = AgentEnv(agent, test_env, cfg.env.keymap, do_reconstruction=cfg.reconstruction)
+        elif mode == 'agent_in_env':
+            env = AgentEnv(agent, test_env, cfg.env.keymap, do_reconstruction=reconstruction_mode)
             keymap = 'empty'
-            if cfg.reconstruction:
+            if reconstruction_mode:
                 size[1] *= 3
 
-        elif cfg.mode == 'agent_in_world_model':
+        elif mode == 'agent_in_world_model':
             wm_env = POPWMEnv4Play(tokenizer=agent.tokenizer, world_model=agent.world_model, device=device,
                                    env=env_fn())
             env = AgentEnv(agent, wm_env, cfg.env.keymap, do_reconstruction=False)
             keymap = 'empty'
 
-    game = Game(env, keymap_name=keymap, size=size, fps=cfg.fps, verbose=bool(cfg.header),
-                record_mode=bool(cfg.save_mode))
+    game = Game(env, keymap_name=keymap, size=size, fps=fps, verbose=bool(header_info),
+                record_mode=bool(save_mode))
     game.run()
 
 
-def play_token_envs(cfg: DictConfig):
+def play_craftax(cfg: DictConfig, fps: int, model_path: Path):
     device = torch.device(cfg.common.device)
+    from envs.wrappers.craftax import make_craftax
+    from craftax.craftax.play_craftax import BLOCK_PIXEL_SIZE_HUMAN, CraftaxRenderer, Action
+    env = SingleProcessEnv(make_craftax)
+    gymnax_env = env.env.env.env
+    jax_env = gymnax_env._env
 
-    # enable image rendering:
+    obs, info = env.reset()
+    env_state = gymnax_env.env_state
 
-    env_fn = partial(instantiate, config=cfg.env.test)
-    test_env = SingleProcessEnv(env_fn)
+    pixel_render_size = 64 // BLOCK_PIXEL_SIZE_HUMAN
 
-    h, w = test_env.env.pixel_obs_shape
-    loguru.logger.info(f"Obs shape: ({h}, {w})")
-    # if cfg.mode.startswith('agent_in_'):
-    #     h, w, _ = test_env.env.unwrapped.observation_space.shape
-    # else:
-    #     h, w = 64, 64
-    multiplier = 800 // h
-    size = [h * multiplier, w * multiplier]
+    renderer = CraftaxRenderer(env, None, pixel_render_size=pixel_render_size)
+    renderer.render(env_state)
 
-    if cfg.mode == 'episode_replay':
-        env = EpisodeReplayEnv(replay_keymap_name=cfg.env.keymap, episode_dir=Path('media/episodes'))
-        keymap = 'episode_replay'
+    agent = build_agent(env, cfg, device=device)
+    if model_path is not None:
+        agent.load(model_path, device, load_tokenizer=False, load_world_model=True, load_actor_critic=True)
+    agent.reset_actor_critic(1, None, None)
 
-    else:
-        tokenizer = None
-        if isinstance(test_env.env.observation_space, gym.spaces.MultiDiscrete):
-            obs_vocab_size = test_env.env.observation_space.nvec[0]
-        elif isinstance(test_env.env.observation_space, gym.spaces.Box):
-            obs_vocab_size = test_env.env.observation_space.high.max() + 1
+    import pygame
+    clock = pygame.time.Clock()
+
+    obs_processors = {m: get_obs_processor(m) for m in env.modalities}
+
+    def obs_to_torch(obs):
+        assert isinstance(obs, dict)
+        assert set(obs.keys()) == set([m.name for m in env.modalities]), f"{set(obs.keys())} != {env.modalities}"
+        torch_obs = {m: obs_processors[m].to_torch(obs[m.name], device=device) for m in env.modalities}
+        processed_obs = {m: obs_processors[m](v) for m, v in torch_obs.items()}
+        return processed_obs
+
+    while not renderer.is_quit_requested():
+        if env_state.is_sleeping or env_state.is_resting:
+            action = [Action.NOOP.value]
         else:
-            assert False, f"unsupported obs space type '{test_env.env.observation_space}'"
+            action = agent.act(obs_to_torch(obs))
+            action = action.detach().cpu().numpy()
+            print(f"Action: {action[0]} ({Action(action[0])})")
 
-        world_model = POPRetNetWorldModel(obs_vocab_size=obs_vocab_size, act_vocab_size=test_env.num_actions,
-                                          config=instantiate(cfg.world_model.retnet), **cfg.world_model)
-        actor_critic = ActorCriticLS(**cfg.actor_critic, act_vocab_size=test_env.num_actions,
-                                     token_embed_dim=cfg.tokenizer.embed_dim,
-                                     tokens_per_obs=cfg.world_model.retnet.tokens_per_block - 1,
-                                     context_len=cfg.world_model.context_length)
+        if action is not None:
+            obs, reward, terminated, truncated, info = env.step(action)
+            env_state = gymnax_env.env_state
+            renderer.render(env_state)
 
-        agent = AgentLS(tokenizer, world_model, actor_critic).to(device)
-        agent.load(Path('checkpoints/last.pt'), device, load_tokenizer=False)
+            if terminated or truncated:
+                agent.reset_actor_critic(1, None, None)
 
-        if cfg.mode == 'play_in_world_model':
-            env = POPWMEnv4Play(tokenizer=agent.tokenizer, world_model=agent.world_model, device=device,
-                                env=env_fn())
-            keymap = cfg.env.keymap
+        renderer.update()
+        clock.tick(fps)
 
-        elif cfg.mode == 'agent_in_env':
-            env = AgentTokenEnv(agent, test_env, cfg.env.keymap, do_reconstruction=cfg.reconstruction)
-            keymap = 'empty'
-            if cfg.reconstruction:
-                size[1] *= 3
-
-        elif cfg.mode == 'agent_in_world_model':
-            wm_env = POPWMEnv4Play(tokenizer=agent.tokenizer, world_model=agent.world_model, device=device,
-                                   env=env_fn())
-            env = AgentTokenEnv(agent, wm_env, cfg.env.keymap, do_reconstruction=False)
-            keymap = 'empty'
-
-    game = Game(env, keymap_name=keymap, size=size, fps=cfg.fps, verbose=bool(cfg.header),
-                record_mode=bool(cfg.save_mode))
-    game.run()
+    print(type(jax_env))
 
 
-from main import config_name
-@hydra.main(config_path="../config", config_name=config_name, version_base=None)
-def main(cfg: DictConfig):
-    device = torch.device(cfg.common.device)
-    assert cfg.mode in ('episode_replay', 'agent_in_env', 'agent_in_world_model', 'play_in_world_model')
+def get_config(benchmark: str):
+    from hydra import compose, initialize
+    initialize(version_base=None, config_path="../config", job_name="play")
+    overrides = [f"benchmark={benchmark}", 'hydra.run.dir=.', 'hydra.output_subdir=null']
+    cfg = compose(config_name="base", overrides=overrides)
+    return cfg
 
-    if cfg.env.obs_modality == 'image':
-        play_image_envs(cfg)
-    elif cfg.env.obs_modality == 'token':
-        play_token_envs(cfg)
-    else:
-        raise NotImplementedError
+
+@click.command()
+@click.option('-m', '--mode',
+              type=click.Choice(['episode_replay', 'agent_in_env', 'agent_in_world_model', 'agent_in_world_model']),
+              default='agent_in_env')
+@click.option('-r', '--reconstruction-mode', is_flag=True, show_default=True, default=False, help='Reconstruction mode. Shows the original observation (left), downscaled observation (center), and reconstructed obs (right) - how the agent sees the world.')
+@click.option('-h', '--header-info', is_flag=True, show_default=True, default=False, help='Show cumulative return, controller actions, and step info.')
+@click.option('--fps', type=click.IntRange(min=1, max=240), default=15, help='frames per second')
+@click.option('-p', '--model-path', type=click.Path(exists=True))
+def atari(mode, reconstruction_mode, header_info, fps, model_path):
+    cfg = get_config(benchmark='atari')
+    play_atari(cfg, mode, reconstruction_mode, header_info, fps, model_path)
+
+
+@click.command()
+@click.option('-m', '--mode', type=click.Choice(['agent_in_env']), default='agent_in_env')
+@click.option('--fps', type=click.IntRange(min=1, max=240), default=15, help='frames per second')
+@click.option('-p', '--model-path', type=click.Path(exists=True))
+def craftax(mode, fps, model_path):
+    cfg = get_config(benchmark='craftax')
+    play_craftax(cfg, fps, model_path)
+
+
+@click.group()
+def main():
+    pass
+
+
+main.add_command(atari)
+main.add_command(craftax)
 
 
 if __name__ == "__main__":

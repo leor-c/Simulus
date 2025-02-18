@@ -16,15 +16,25 @@ docker attach m3_c
 ```
 Use the container's command line to run the desired script (detailed below).
 
-If using Windows OS and would like to render the environment, it is necessary to set up X11 forwarding.
-We used [VcXsrv](https://github.com/marchaesen/vcxsrv) as an X server.
-Then, in your Windows command line, set up the `DISPLAY` environment variable using
+### X11 Forwarding
+If you would like to render the environment, it is necessary to set up X11 forwarding.
+
+##### On Windows OS:
+we used [VcXsrv](https://github.com/marchaesen/vcxsrv) as an X server.
+Then, set up the `DISPLAY` environment variable by executing 
 ```bash
-setx DISPLAY=<your-ip>:0
+export DISPLAY=<your-host-ip>:0
 ```
-or just `set DISPLAY=<your-ip>:0` for the current session only.
+inside the docker container (after attaching).
+This can also be set in the Windows command line using `setx DISPLAY=<your-host-ip>:0` or just `set DISPLAY=<your-host-ip>:0` for the current session only.
+
 You can validate the value is correct by executing `echo $DISPLAY` in the Docker container.
 
+##### Linux OS:
+If the game window is not appearing, try executing `sudo xhost +` on the host machine (before attaching to the docker container).
+
+
+##### Headless Mode
 To run in headless mode, execute `export MUJOCO_GL='osmesa'` in the Docker container's terminal before launching the training script.
 
 ## Setup
@@ -99,20 +109,20 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
 - `scripts`: **from the run folder**, you can use the following three scripts.
   - `eval.py`: Launch `python ./scripts/eval.py` to evaluate the run.
   - `resume.sh`: Launch `./scripts/resume.sh` to resume a training that crashed.
-  - `play.sh`: Tool to visualize some interesting aspects of the run.
-    - Launch `./scripts/play.sh` to watch the agent play live in the environment. If you add the flag `-r`, the left panel displays the original frame, the center panel displays the same frame downscaled to the input resolution of the discrete autoencoder, and the right panel shows the output of the autoencoder (what the agent actually sees).
-    - Launch `./scripts/play.sh -w` to unroll live trajectories with your keyboard inputs (i.e. to play in the world model). Note that since the world model was trained with segments of $H$ steps where the first $c$ observations serve as a context, the memory of the world model is flushed every $H-c$ frames.
-    - Launch `./scripts/play.sh -a` to watch the agent play live in the world model. World model memory flush applies here as well for the same reasons.
-    - Launch `./scripts/play.sh -e` to visualize the episodes contained in `media/episodes`.
-    - Add the flag `-h` to display a header with additional information.
-    - Press '`,`' to start and stop recording. The corresponding segment is saved in `media/recordings` in mp4 and numpy formats.
-    - Add the flag `-s` to enter 'save mode', where the user is prompted to save trajectories upon completion.
+  - `play.py`: Tool to visualize the learned controller / world model / representations. 
+    - Use `python src/play.py --help` to print usage information. Currently, this tool only supports `atari` and `craftax` options.
+    - Launch `python src/play.py <benchmark> -p <path-to-model-weights>` to watch the agent play live in the environment. If you add the flag `-r` (Atari only), the left panel displays the original frame, the center panel displays the same frame downscaled to the input resolution of the discrete autoencoder, and the right panel shows the output of the autoencoder (what the agent actually sees). The `-h` flag shows additional information (Atari only).
+
+[//]: # (    - Launch `./scripts/play.sh -w` to unroll live trajectories with your keyboard inputs &#40;i.e. to play in the world model&#41;. Note that since the world model was trained with segments of $H$ steps where the first $c$ observations serve as a context, the memory of the world model is flushed every $H-c$ frames.)
+[//]: # (    - Launch `./scripts/play.sh -a` to watch the agent play live in the world model. World model memory flush applies here as well for the same reasons.)
+[//]: # (    - Launch `./scripts/play.sh -e` to visualize the episodes contained in `media/episodes`.)
+[//]: # (    - Add the flag `-h` to display a header with additional information.)
+[//]: # (    - Press '`,`' to start and stop recording. The corresponding segment is saved in `media/recordings` in mp4 and numpy formats.)
+[//]: # (    - Add the flag `-s` to enter 'save mode', where the user is prompted to save trajectories upon completion.)
 
 ## Results
 
-The folder `results/data/` contains raw scores (for each game, and for each training run) for REM other baselines, and ablations.
-
-The results python scripts can be used to reproduce the plots from the paper.
+The folder `results/data/` contains raw scores (for each game, and for each training run).
 
 ## Credits
 

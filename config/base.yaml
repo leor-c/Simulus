@@ -14,7 +14,7 @@ hydra:
     dir: ${outputs_dir_path}/${env.train.id}/${now:%Y-%m-%d}/${now:%H-%M-%S}-seed-${common.seed}
 
 wandb:
-  mode: offline
+  mode: online
   project: rem
   entity: null
   name: null

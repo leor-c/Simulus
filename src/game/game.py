@@ -8,7 +8,7 @@ import pygame
 from PIL import Image
 
 from envs import POPWorldModelEnv, SingleProcessEnv
-from game import AgentEnv, AgentTokenEnv
+from game import AgentEnv
 from game.keymap import get_keymap_and_action_names
 from utils import make_video
 
@@ -16,7 +16,7 @@ from utils import make_video
 def get_underlying_env(env: Union[gym.Env, POPWorldModelEnv]):
     if isinstance(env, POPWorldModelEnv):
         underlying_env = env.env
-    elif isinstance(env, (AgentEnv, AgentTokenEnv)):
+    elif isinstance(env, AgentEnv):
         if isinstance(env.env, POPWorldModelEnv):
             underlying_env = env.env.env
         elif isinstance(env.env, SingleProcessEnv):
@@ -37,7 +37,7 @@ class Game:
         self.fps = fps
         self.verbose = verbose
         self.record_mode = record_mode
-        self.has_noop = keymap_name in ['atari', 'token_world']
+        self.has_noop = keymap_name in ['atari']
 
         underlying_env = get_underlying_env(env)
         self.keymap, self.action_names = get_keymap_and_action_names(keymap_name, underlying_env)
@@ -116,7 +116,7 @@ class Game:
                         do_reset = True
                     if event.key == pygame.K_PERIOD:
                         do_wait = not do_wait
-                    if event.key == pygame.K_COMMA:
+                    if event.unicode == "R":
                         if not recording:
                             recording = True
                             print('Started recording.')
@@ -137,7 +137,8 @@ class Game:
             if do_wait:
                 continue
 
-            _, reward, done, info = self.env.step(action)
+            _, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
 
             img = info['rgb'] if isinstance(self.env, gym.Env) else self.env.render()
             draw_game(img)

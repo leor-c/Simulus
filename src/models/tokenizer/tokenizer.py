@@ -770,4 +770,4 @@ class MultiModalTokenizer(nn.Module):
     def encode_decode(self, x: dict[ObsModality, Tensor], should_preprocess: bool = False,
                       should_postprocess: bool = False) -> dict[ObsModality, Tensor]:
         encoded = self.encode(x, should_preprocess=should_preprocess)
-        return self.decode({k: v.z_quantized for k, v in encoded.items()})
+        return self.decode({k: v.z_quantized for k, v in encoded.items()}, should_postprocess=should_postprocess)

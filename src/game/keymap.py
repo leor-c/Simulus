@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import pygame
 
 
@@ -18,7 +18,7 @@ def get_keymap_and_action_names(name: str, env):
 
     assert name.startswith('atari/')
     env_id = name.split('atari/')[1]
-    action_names = [x.lower() for x in gym.make(env_id).get_action_meanings()]
+    action_names = [x.lower() for x in gym.make(env_id).env.env.get_action_meanings()]
     keymap = {}
     for key, value in ATARI_KEYMAP.items():
         if ATARI_ACTION_NAMES[value] in action_names:
