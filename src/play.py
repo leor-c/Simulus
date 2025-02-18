@@ -5,6 +5,8 @@ import click
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 import torch
+import numpy as np
+from scipy.ndimage import rotate
 
 from main import build_agent
 from envs import SingleProcessEnv, POPWMEnv4Play
@@ -59,7 +61,7 @@ def play_atari(cfg: DictConfig, mode, reconstruction_mode, header_info, fps, mod
     game.run()
 
 
-def play_craftax(cfg: DictConfig, fps: int, model_path: Path):
+def play_craftax(cfg: DictConfig, fps: int, actions_info: bool, model_path: Path):
     device = torch.device(cfg.common.device)
     from envs.wrappers.craftax import make_craftax
     from craftax.craftax.play_craftax import BLOCK_PIXEL_SIZE_HUMAN, CraftaxRenderer, Action
@@ -67,12 +69,17 @@ def play_craftax(cfg: DictConfig, fps: int, model_path: Path):
     gymnax_env = env.env.env.env
     jax_env = gymnax_env._env
 
+    recording = False
+    frames_buffer = []
+    record_dir = Path('media') / 'recordings'
+
     obs, info = env.reset()
     env_state = gymnax_env.env_state
 
     pixel_render_size = 64 // BLOCK_PIXEL_SIZE_HUMAN
 
     renderer = CraftaxRenderer(env, None, pixel_render_size=pixel_render_size)
+    print(f'screen size: {renderer.screen_size}')
     renderer.render(env_state)
 
     agent = build_agent(env, cfg, device=device)
@@ -81,7 +88,10 @@ def play_craftax(cfg: DictConfig, fps: int, model_path: Path):
     agent.reset_actor_critic(1, None, None)
 
     import pygame
+    pygame.key.set_repeat(0, 0)
     clock = pygame.time.Clock()
+
+    print(f"Press 'R' to start/stop recording a video.")
 
     obs_processors = {m: get_obs_processor(m) for m in env.modalities}
 
@@ -93,12 +103,29 @@ def play_craftax(cfg: DictConfig, fps: int, model_path: Path):
         return processed_obs
 
     while not renderer.is_quit_requested():
+        is_record_key_pressed = any([(e.type == pygame.KEYDOWN and e.unicode == 'R') for e in renderer.pygame_events])
+        if is_record_key_pressed:
+            if not recording:
+                recording = True
+                print('Started recording.')
+            else:
+                print('Stopped recording.')
+                Game.save_recording(record_dir, np.stack(frames_buffer))
+                recording = False
+                frames_buffer = []
+
+        if recording:
+            frame = pygame.display.get_surface()
+            frame = np.fliplr(rotate(pygame.surfarray.array3d(frame), angle=-90))
+            frames_buffer.append(frame)
+
         if env_state.is_sleeping or env_state.is_resting:
             action = [Action.NOOP.value]
         else:
             action = agent.act(obs_to_torch(obs))
             action = action.detach().cpu().numpy()
-            print(f"Action: {action[0]} ({Action(action[0])})")
+            if actions_info:
+                print(f"Action: {action[0]} ({Action(action[0])})")
 
         if action is not None:
             obs, reward, terminated, truncated, info = env.step(action)
@@ -138,10 +165,11 @@ def atari(mode, reconstruction_mode, header_info, fps, model_path):
 @click.command()
 @click.option('-m', '--mode', type=click.Choice(['agent_in_env']), default='agent_in_env')
 @click.option('--fps', type=click.IntRange(min=1, max=240), default=15, help='frames per second')
+@click.option('-i', '--actions-info', is_flag=True, show_default=True, default=False, help='Print the actions of the agent.')
 @click.option('-p', '--model-path', type=click.Path(exists=True))
-def craftax(mode, fps, model_path):
+def craftax(mode, fps, actions_info, model_path):
     cfg = get_config(benchmark='craftax')
-    play_craftax(cfg, fps, model_path)
+    play_craftax(cfg, fps, actions_info, model_path)
 
 
 @click.group()

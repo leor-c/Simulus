@@ -184,10 +184,20 @@ def make_video(fname, fps, frames):
     t, h, w, c = frames.shape
     assert c == 3
 
-    video = cv2.VideoWriter(str(fname), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+    # Define the codec and quality parameters
+    codec = 'libx265'
+    quality = 5  # Quality scale (0-10, lower is better)
+
+    # Create the video writer
+    import imageio
+    writer = imageio.get_writer(fname, fps=fps, codec=codec, quality=quality)
+
     for frame in frames:
-        video.write(frame[:, :, ::-1])
-    video.release()
+        writer.append_data(frame)
+
+    writer.close()
+
+    print(f"Video saved as {fname}")
 
 
 class TrainerInfoHandler(ABC):

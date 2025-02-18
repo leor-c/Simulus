@@ -122,7 +122,7 @@ class Game:
                             print('Started recording.')
                         else:
                             print('Stopped recording.')
-                            self.save_recording(np.stack(segment_buffer))
+                            self.save_recording(self.record_dir, np.stack(segment_buffer))
                             recording = False
                             segment_buffer = []
 
@@ -168,14 +168,15 @@ class Game:
 
                 if self.record_mode:
                     if input('Save episode? [Y/n] ').lower() != 'n':
-                        self.save_recording(np.stack(episode_buffer))
+                        self.save_recording(self.record_dir, np.stack(episode_buffer))
                     episode_buffer = []
 
         pygame.quit()
 
-    def save_recording(self, frames):
-        self.record_dir.mkdir(exist_ok=True, parents=True)
+    @classmethod
+    def save_recording(cls, record_dir, frames):
+        record_dir.mkdir(exist_ok=True, parents=True)
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        np.save(self.record_dir / timestamp, frames)
-        make_video(self.record_dir / f'{timestamp}.mp4', fps=15, frames=frames)
+        np.save(record_dir / timestamp, frames)
+        make_video(record_dir / f'{timestamp}.mp4', fps=15, frames=frames)
         print(f'Saved recording {timestamp}.')

@@ -1,6 +1,37 @@
 # M3: A Modular World Model over Streams of Tokens
+Lior Cohen, Kaixin Wang, Bingyi Kang, Uri Gadot, Shie Mannor
 
-The weights of our trained models are available through this [link]() (Soon!)
+📄 Paper: https://arxiv.org/abs/2502.11537
+
+🧠 Trained model weights: [In our HuggingFace page](https://huggingface.co/leorc/M3).
+
+<video width="160" height="224" controls>
+  <source src="media/Kangaroo.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+<video width="160" height="224" controls>
+  <source src="media/DemonAttack.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+<video width="160" height="224" controls>
+  <source src="media/Breakout.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+<video width="160" height="224" controls>
+  <source src="media/UpNDown-75k.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+<video width="160" height="224" controls>
+  <source src="media/KungFuMaster.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+
+<video width="352" height=" 416" controls>
+  <source src="media/Craftax.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
 
 ## Docker
 We provide a Dockerfile for building a docker image and running the code in a docker container.
@@ -53,6 +84,20 @@ python src/main.py benchmark=atari env.train.id=BreakoutNoFrameskip-v4 common.de
 To run other benchmarks use `benchmark=dmc` for DeepMind Control Suite or `benchmark=craftax` for Craftax.
 By default, the logs are synced to [weights & biases](https://wandb.ai), set `wandb.mode=disabled` to turn it off 
 or `wandb.mode=offline` for offline logging.
+
+
+
+## Visualizing Trained Models
+Download a trained model and use 
+```bash
+python src/play.py <benchmark> -p <path-to-model-weights>
+```
+to visualize the agent controlling the real environment live.
+For Atari, make sure to use the correct environment ID in the configuration by setting `env.train.id=<game_name>NoFrameSkip-v4` in `config/env/atari.yaml` (e.g., `env.train.id=DemonAttackNoFrameskip-v4`).
+For more options, use `python src/play.py --help` or see details below.
+
+For example, to visualize the Craftax agent, download `Craftax.pt` from our [HuggingFace repo](https://huggingface.co/leorc/M3), place it in `M3/checkpoints/Craftax.pt` and launch `python src/play.py craftax -p checkpoints/Craftax.pt` (from the attached Docker container).
+
 
 ## Configuration
 
@@ -112,6 +157,7 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
   - `play.py`: Tool to visualize the learned controller / world model / representations. 
     - Use `python src/play.py --help` to print usage information. Currently, this tool only supports `atari` and `craftax` options.
     - Launch `python src/play.py <benchmark> -p <path-to-model-weights>` to watch the agent play live in the environment. If you add the flag `-r` (Atari only), the left panel displays the original frame, the center panel displays the same frame downscaled to the input resolution of the discrete autoencoder, and the right panel shows the output of the autoencoder (what the agent actually sees). The `-h` flag shows additional information (Atari only).
+    - Press `R` to start/stop recording a video.
 
 [//]: # (    - Launch `./scripts/play.sh -w` to unroll live trajectories with your keyboard inputs &#40;i.e. to play in the world model&#41;. Note that since the world model was trained with segments of $H$ steps where the first $c$ observations serve as a context, the memory of the world model is flushed every $H-c$ frames.)
 [//]: # (    - Launch `./scripts/play.sh -a` to watch the agent play live in the world model. World model memory flush applies here as well for the same reasons.)
