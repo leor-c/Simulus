@@ -160,6 +160,19 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
 
 The folder `results/data/` contains raw scores (for each game, and for each training run).
 
+## Citation
+```
+@misc{cohen2025m3,
+      title={$\text{M}^{\text{3}}$: A Modular World Model over Streams of Tokens}, 
+      author={Lior Cohen and Kaixin Wang and Bingyi Kang and Uri Gadot and Shie Mannor},
+      year={2025},
+      eprint={2502.11537},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2502.11537}, 
+}
+```
+
 ## Credits
 
 - [https://github.com/leor-c/REM](https://github.com/leor-c/REM)
