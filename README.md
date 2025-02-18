@@ -7,11 +7,11 @@ Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Ma
 
 
 <div align="center">
-<img src="https://github.com/user-attachments/assets/14734453-38dd-4bc0-a2e0-349e4eec37a2" height="250" />
-<img src="https://github.com/user-attachments/assets/11beac5f-f8ee-48a7-94ec-2130087ed060" height="250" />
-<img src="https://github.com/user-attachments/assets/a7e89c77-754f-43e3-982c-423c1257846c" height="250" />
-<img src="https://github.com/user-attachments/assets/2ae2791a-9aec-4649-88ad-56e9840cd6b1" height="250" />
-<img src="https://github.com/user-attachments/assets/2d5f9c98-2468-4206-95ac-e4d370798d7e" height="250" />
+<img src="https://github.com/user-attachments/assets/14734453-38dd-4bc0-a2e0-349e4eec37a2" height="220" />
+<img src="https://github.com/user-attachments/assets/11beac5f-f8ee-48a7-94ec-2130087ed060" height="220" />
+<img src="https://github.com/user-attachments/assets/a7e89c77-754f-43e3-982c-423c1257846c" height="220" />
+<img src="https://github.com/user-attachments/assets/2ae2791a-9aec-4649-88ad-56e9840cd6b1" height="220" />
+<img src="https://github.com/user-attachments/assets/2d5f9c98-2468-4206-95ac-e4d370798d7e" height="220" />
 </div>
 
 <div align="center">
