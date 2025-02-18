@@ -29,7 +29,7 @@ To use docker with GPUs, make sure to install the `nvidia-container-toolkit` ([l
 
 To build the docker image and run a container, run the following command from the project root folder:
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 To access the command line of the container, run
 ```bash
