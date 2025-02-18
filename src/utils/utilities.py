@@ -185,7 +185,7 @@ def make_video(fname, fps, frames):
     assert c == 3
 
     # Define the codec and quality parameters
-    codec = 'libx265'
+    codec = 'libx264'
     quality = 5  # Quality scale (0-10, lower is better)
 
     # Create the video writer
