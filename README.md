@@ -23,7 +23,7 @@ Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Ma
 
 
 
-## Docker
+## 🐋 Docker
 We provide a Dockerfile for building a docker image and running the code in a docker container.
 To use docker with GPUs, make sure to install the `nvidia-container-toolkit` ([link](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)) on the host machine.
 
@@ -58,26 +58,30 @@ If the game window is not appearing, try executing `sudo xhost +` on the host ma
 ##### Headless Mode
 To run in headless mode, execute `export MUJOCO_GL='osmesa'` in the Docker container's terminal before launching the training script.
 
-## Setup
+## 🏗️ Setup
 
 - Python 3.10
 - Install [PyTorch](https://pytorch.org/get-started/locally/) (torch and torchvision). Code developed with several versions of Pytorch, with the latest being torch==2.4.1, but should work with other recent version.
 - Install [other dependencies](requirements.txt): `pip install -r requirements.txt`
 - Warning: Atari ROMs will be downloaded with the dependencies, which means that you acknowledge that you have the license to use them.
 
-## Launch a training run
+## 🏋️ Launch a training run
 
 ```bash
-python src/main.py benchmark=atari env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0 wandb.mode=online
+python src/main.py benchmark=atari
 ```
 
 To run other benchmarks use `benchmark=dmc` for DeepMind Control Suite or `benchmark=craftax` for Craftax.
+To change an environment within a benchmark, set `env.train.id` by modifying the appropriate configuration file located in `config/env` or through the command line:
+```bash
+python src/main.py benchmark=atari env.train.id=BreakoutNoFrameskip-v4
+```
 By default, the logs are synced to [weights & biases](https://wandb.ai), set `wandb.mode=disabled` to turn it off 
 or `wandb.mode=offline` for offline logging.
 
 
 
-## Visualizing Trained Models
+## 📺 Visualizing Trained Models
 Download a trained model and use 
 ```bash
 python src/play.py <benchmark> -p <path-to-model-weights>
@@ -89,14 +93,14 @@ For more options, use `python src/play.py --help` or see details below.
 For example, to visualize the Craftax agent, download `Craftax.pt` from our [HuggingFace repo](https://huggingface.co/leorc/M3), place it in `M3/checkpoints/Craftax.pt` and launch `python src/play.py craftax -p checkpoints/Craftax.pt` (from the attached Docker container).
 
 
-## Configuration
+## 🛠️ Configuration
 
 - All configuration files are located in `config/`, the main configuration file is `config/base.yaml`.
 - Each benchmark overrides the base configuration. Each root benchmark config is located in `config/benchmark`.
 - The simplest way to customize the configuration is to edit these files directly.
 - Please refer to [Hydra](https://github.com/facebookresearch/hydra) for more details regarding configuration management.
 
-## Run folder
+## 📁 Run folder
 
 Each new run is located at `outputs/env.id/YYYY-MM-DD/hh-mm-ss/`. This folder is structured as:
 
@@ -157,11 +161,11 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
 [//]: # (    - Press '`,`' to start and stop recording. The corresponding segment is saved in `media/recordings` in mp4 and numpy formats.)
 [//]: # (    - Add the flag `-s` to enter 'save mode', where the user is prompted to save trajectories upon completion.)
 
-## Results
+## 📈 Results
 
 The folder `results/data/` contains raw scores (for each game, and for each training run).
 
-## Citation
+## 👉 Citation
 ```
 @misc{cohen2025m3,
       title={$\text{M}^{\text{3}}$: A Modular World Model over Streams of Tokens}, 
@@ -174,7 +178,7 @@ The folder `results/data/` contains raw scores (for each game, and for each trai
 }
 ```
 
-## Credits
+## 🌟 Credits
 
 - [https://github.com/leor-c/REM](https://github.com/leor-c/REM)
 - [yet-another-retnet](https://github.com/fkodom/yet-another-retnet)
