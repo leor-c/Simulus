@@ -65,7 +65,7 @@ To run in headless mode, execute `export MUJOCO_GL='osmesa'` in the Docker conta
 - Install [other dependencies](requirements.txt): `pip install -r requirements.txt`
 - Warning: Atari ROMs will be downloaded with the dependencies, which means that you acknowledge that you have the license to use them.
 
-## 🏋️ Launch a training run
+## 🏋️ Launch a Training Run
 
 ```bash
 python src/main.py benchmark=atari
@@ -100,7 +100,7 @@ For example, to visualize the Craftax agent, download `Craftax.pt` from our [Hug
 - The simplest way to customize the configuration is to edit these files directly.
 - Please refer to [Hydra](https://github.com/facebookresearch/hydra) for more details regarding configuration management.
 
-## 📁 Run folder
+## 📁 Run Folder
 
 Each new run is located at `outputs/env.id/YYYY-MM-DD/hh-mm-ss/`. This folder is structured as:
 
