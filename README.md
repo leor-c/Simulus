@@ -52,7 +52,7 @@ This can also be set in the Windows command line using `setx DISPLAY=<your-host-
 You can validate the value is correct by executing `echo $DISPLAY` in the Docker container.
 
 ##### Linux OS:
-If the game window is not appearing, try executing `sudo xhost +` on the host machine (before attaching to the docker container).
+If the game window fails to appear, try executing `sudo xhost +` on the host machine (before attaching to the docker container).
 
 
 ##### Headless Mode
