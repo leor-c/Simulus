@@ -126,11 +126,12 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
 │
 └─── scripts
 |   |   eval.py
-│   │   play.sh
 │   │   resume.sh
 |   |   ...
 |
 └─── src
+|   |   main.py
+|   |   play.py
 |   |   ...
 |
 └─── wandb
@@ -141,10 +142,10 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
 - `media`:
   - `episodes`: contains train / test / imagination episodes for visualization purposes.
   - `reconstructions`: contains original frames alongside their reconstructions with the autoencoder.
-- `scripts`: **from the run folder**, you can use the following three scripts.
+- `scripts`: **from the run folder**, you can use the following scripts.
   - `eval.py`: Launch `python ./scripts/eval.py` to evaluate the run.
   - `resume.sh`: Launch `./scripts/resume.sh` to resume a training that crashed.
-  - `play.py`: Tool to visualize the learned controller / world model / representations. 
+- `play.py`: Tool to visualize the learned controller / world model / representations. 
     - Use `python src/play.py --help` to print usage information. Currently, this tool only supports `atari` and `craftax` options.
     - Launch `python src/play.py <benchmark> -p <path-to-model-weights>` to watch the agent play live in the environment. If you add the flag `-r` (Atari only), the left panel displays the original frame, the center panel displays the same frame downscaled to the input resolution of the discrete autoencoder, and the right panel shows the output of the autoencoder (what the agent actually sees). The `-h` flag shows additional information (Atari only).
     - Press `R` to start/stop recording a video.
