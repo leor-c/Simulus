@@ -1,13 +1,12 @@
 services:
-  rem:
+  m3:
     build: ./
-    container_name: rem_c
+    container_name: m3_c
     environment:
       - DISPLAY=$DISPLAY
     shm_size: '8gb'
     volumes:
-      - .:/REM
-#      - ./rem-outputs:/REM/outputs
+      - .:/M3
       - /tmp/.X11-unix:/tmp/.X11-unix
     stdin_open: true # docker run -i
     tty: true        # docker run -t
@@ -18,5 +17,3 @@ services:
             - capabilities: [gpu]
 #              device_ids: ['0']
               count: all
-#volumes:
-#  rem-outputs:

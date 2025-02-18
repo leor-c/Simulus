@@ -264,7 +264,7 @@ class POPWorldModel(nn.Module):
         self.compute_states_parallel_inference = False
         self.pred_tokens_version = 'shared' if shared_prediction_token else 'per-token'
 
-        logger.info(f"Initialized {self.__class__}. Shared embeddings: {self.shared_embeddings}")
+        logger.info(f"Initialized {self.__repr__()}.")
 
     @property
     def tokens_per_block(self) -> int:

@@ -440,7 +440,7 @@ class POPMultiScaleRetention(yet_another_retnet.retention.MultiScaleRetention):
         self.mask_type = mask_type
         self.tokens_per_block = tokens_per_block
 
-        logger.info(f"Using decay scale range [{decay_scale_min_num_blocks}, {decay_scale_max_num_blocks}] (blocks)")
+        # logger.info(f"Using decay scale range [{decay_scale_min_num_blocks}, {decay_scale_max_num_blocks}] (blocks)")
 
     def retention_chunkwise_per_block_states(
             self,

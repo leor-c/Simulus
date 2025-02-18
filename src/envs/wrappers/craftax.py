@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import gymnasium
@@ -6,6 +7,9 @@ from gymnasium.core import ObsType, ActType, WrapperObsType
 
 from envs.wrappers.multi_modal import MultiModalObsWrapper, DictObsWrapper
 from utils import ObsModality
+
+
+os.environ['JAX_PLATFORMS'] = 'cpu'
 
 
 def make_craftax(id: str = "Craftax-Symbolic-v1"):

@@ -98,7 +98,6 @@ class Trainer:
         if not cfg.common.resume:
             config_dir = Path('config')
             config_path = config_dir / f'base.yaml'
-            logger.debug(f"abs path: {config_path.absolute()}")
             config_dir.mkdir(exist_ok=False, parents=False)
             shutil.copy('.hydra/config.yaml', config_path)
             wandb.save(str(config_path))
@@ -131,8 +130,8 @@ class Trainer:
 
         assert self.cfg.training.should or self.cfg.evaluation.should
         env = self.train_env if self.cfg.training.should else self.test_env
-        logger.info(f"Obs space: {env.observation_space}")
-        logger.info(f"Action space size: {env.num_actions}")
+        # logger.info(f"Obs space: {env.observation_space}")
+        # logger.info(f"Action space size: {env.num_actions}")
 
         self.agent = self.build_agent()
 

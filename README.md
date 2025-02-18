@@ -12,7 +12,7 @@ docker-compose up -d
 ```
 To access the command line of the container, run
 ```bash
-docker attach rem_c
+docker attach m3_c
 ```
 Use the container's command line to run the desired script (detailed below).
 
