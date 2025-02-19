@@ -7,6 +7,7 @@ import cv2
 import random
 import shutil
 
+import imageio
 from einops import rearrange, einsum
 import gymnasium
 import numpy as np
@@ -198,6 +199,27 @@ def make_video(fname, fps, frames):
     writer.close()
 
     print(f"Video saved as {fname}")
+
+
+class VideoMaker:
+    def __init__(self, file_name, fps: int = 15, codec: str = 'libx264', quality: int = 5):
+        self.fps = fps
+        self.codec = codec
+        self.quality = quality
+        self.file_name = file_name
+
+        self.writer = None
+
+    def add_frame(self, frame: np.ndarray):
+        if self.writer is None:
+            self.writer = imageio.get_writer(self.file_name, fps=self.fps, codec=self.codec, quality=self.quality)
+        self.writer.append_data(frame)
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.close()
+            print(f"Video saved as {self.file_name}")
+            self.writer = None
 
 
 class TrainerInfoHandler(ABC):

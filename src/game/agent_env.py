@@ -28,8 +28,7 @@ class AgentEnv:
     def _to_tensor(self, obs: dict[str, np.ndarray]):
         assert isinstance(obs, dict)
         assert set(obs.keys()) == set([m.name for m in self.env.modalities]), f"{set(obs.keys())} != {self.env.modalities}"
-        device = self.agent.device
-        torch_obs = {m: self.obs_processors[m].to_torch(obs[m.name], device=device) for m in self.env.modalities}
+        torch_obs = {m: self.obs_processors[m].to_torch(obs[m.name], device=self.agent.device) for m in self.env.modalities}
         processed_obs = {m: self.obs_processors[m](v) for m, v in torch_obs.items()}
         return processed_obs
 
@@ -54,9 +53,9 @@ class AgentEnv:
         self._t += 1
         self._return += reward[0]
         info = {
-            'timestep': self._t,
-            'action': self.action_names[act[0]],
-            'return': self._return,
+            'Timestep': self._t,
+            'Action': self.action_names[act[0]],
+            'Return': f"{self._return:.2f}",
         }
         return obs, reward, terminated, truncated, info
 
@@ -77,3 +76,26 @@ class AgentEnv:
         else:
             arr = original_obs
         return Image.fromarray(arr)
+
+
+class CraftaxAgentEnv(AgentEnv):
+
+    def __init__(self, agent: Agent, env: SingleProcessEnv, pixel_render_size: int = 4) -> None:
+        super().__init__(agent, env, 'craftax', False)
+        self.pixel_render_size = pixel_render_size
+        self.gymnax_env = env.env.env.env
+        import jax
+        from craftax.craftax.renderer import render_craftax_pixels
+        self._render = jax.jit(render_craftax_pixels, static_argnums=(1,))
+
+    def render(self) -> Image.Image:
+        from craftax.craftax.play_craftax import BLOCK_PIXEL_SIZE_HUMAN
+        import jax.numpy as jnp
+        env_state = self.gymnax_env.env_state
+        pixels = self._render(env_state, block_pixel_size=BLOCK_PIXEL_SIZE_HUMAN)
+        pixels = jnp.repeat(pixels, repeats=self.pixel_render_size, axis=0)
+        pixels = jnp.repeat(pixels, repeats=self.pixel_render_size, axis=1)
+
+        img = np.array(pixels, dtype=np.uint8)
+
+        return Image.fromarray(img)

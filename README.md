@@ -24,10 +24,11 @@ Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Ma
 
 
 ## 🐋 Docker
-We provide a Dockerfile for building a docker image and running the code in a docker container.
+We provide [Docker](https://www.docker.com/) files for automatically building a Docker image and running the code in a Docker container.
+Our code uses Docker compose, which automatically sets up the environment for you with one command.
 To use docker with GPUs, make sure to install the `nvidia-container-toolkit` ([link](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)) on the host machine.
 
-To build the docker image and run a container, run the following command from the project root folder:
+To build the docker image and run a container automatically, run the following command from the project root folder:
 ```bash
 docker compose up -d
 ```
@@ -36,8 +37,9 @@ To access the command line of the container, run
 docker attach m3_c
 ```
 Use the container's command line to run the desired script (detailed below).
+You can detach from the container using `CTRL+D`, and stop the container using `docker compose down`.
 
-### X11 Forwarding
+### Environment Rendering (Optional)
 If you would like to render the environment, it is necessary to set up X11 forwarding.
 
 ##### On Windows OS:
@@ -59,10 +61,11 @@ If the game window fails to appear, try executing `sudo xhost +` on the host mac
 To run in headless mode, execute `export MUJOCO_GL='osmesa'` in the Docker container's terminal before launching the training script.
 
 ## 🏗️ Setup
-
-- Python 3.10
-- Install [PyTorch](https://pytorch.org/get-started/locally/) (torch and torchvision). Code developed with several versions of Pytorch, with the latest being torch==2.4.1, but should work with other recent version.
-- Install [other dependencies](requirements.txt): `pip install -r requirements.txt`
+- We highly recommend using Docker for setting up the environment, as described above. 
+- If you wish to set up the environment manually without Docker, we recommend following the steps in the `Dockerfile`.
+  - Python 3.10
+  - Install [PyTorch](https://pytorch.org/get-started/locally/) (torch and torchvision). Code developed with several versions of Pytorch, with the latest being torch==2.4.1, but should work with other recent version.
+  - Install [other dependencies](requirements.txt): `pip install -r requirements.txt`
 - Warning: Atari ROMs will be downloaded with the dependencies, which means that you acknowledge that you have the license to use them.
 
 ## 🏋️ Launch a Training Run

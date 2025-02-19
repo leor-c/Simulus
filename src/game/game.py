@@ -2,15 +2,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Union
 
-import gym
+import gymnasium as gym
 import numpy as np
 import pygame
 from PIL import Image
+from scipy.ndimage import rotate
 
 from envs import POPWorldModelEnv, SingleProcessEnv
 from game import AgentEnv
 from game.keymap import get_keymap_and_action_names
-from utils import make_video
+from utils import make_video, VideoMaker
 
 
 def get_underlying_env(env: Union[gym.Env, POPWorldModelEnv]):
@@ -52,7 +53,7 @@ class Game:
         pygame.init()
 
         header_height = 100 if self.verbose else 0
-        font_size = 24
+        font_size = int(0.05 * self.width)
         screen = pygame.display.set_mode((self.width, self.height + header_height))
         clock = pygame.time.Clock()
         font = pygame.font.SysFont(None, font_size)
@@ -72,8 +73,11 @@ class Game:
                 image = Image.fromarray(image)
             else:
                 assert isinstance(image, Image.Image)
-            pygame_image = np.array(image.resize((self.width, self.height), resample=Image.NEAREST)).transpose(
-                (1, 0, 2))
+
+            pygame_image = image
+            if image.size != (self.width, self.height):
+                pygame_image = image.resize((self.width, self.height), resample=Image.NEAREST)
+            pygame_image = np.array(pygame_image).transpose((1, 0, 2))
             surface = pygame.surfarray.make_surface(pygame_image)
             screen.blit(surface, (0, header_height))
 
@@ -90,7 +94,9 @@ class Game:
         pygame.display.flip()
 
         episode_buffer = []
-        segment_buffer = []
+        self.record_dir.mkdir(exist_ok=True, parents=True)
+        video_maker = VideoMaker(file_name=self.generate_video_file_name(), fps=self.fps)
+
         recording = False
 
         do_reset, do_wait = False, False
@@ -122,9 +128,9 @@ class Game:
                             print('Started recording.')
                         else:
                             print('Stopped recording.')
-                            self.save_recording(self.record_dir, np.stack(segment_buffer))
+                            video_maker.close()
+                            video_maker.file_name = self.generate_video_file_name()
                             recording = False
-                            segment_buffer = []
 
             if action == 0:
                 pressed = pygame.key.get_pressed()
@@ -144,7 +150,9 @@ class Game:
             draw_game(img)
 
             if recording:
-                segment_buffer.append(np.array(img))
+                frame = pygame.display.get_surface()
+                frame = np.fliplr(rotate(pygame.surfarray.array3d(frame), angle=-90))
+                video_maker.add_frame(frame)
 
             if self.record_mode:
                 episode_buffer.append(np.array(img))
@@ -168,15 +176,18 @@ class Game:
 
                 if self.record_mode:
                     if input('Save episode? [Y/n] ').lower() != 'n':
-                        self.save_recording(self.record_dir, np.stack(episode_buffer))
+                        self.save_recording(self.record_dir, np.stack(episode_buffer), self.fps)
                     episode_buffer = []
 
         pygame.quit()
 
+    def generate_video_file_name(self):
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        return self.record_dir / f'{timestamp}.mp4'
+
     @classmethod
-    def save_recording(cls, record_dir, frames):
+    def save_recording(cls, record_dir, frames, fps=15):
         record_dir.mkdir(exist_ok=True, parents=True)
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        np.save(record_dir / timestamp, frames)
-        make_video(record_dir / f'{timestamp}.mp4', fps=15, frames=frames)
+        make_video(record_dir / f'{timestamp}.mp4', fps=fps, frames=frames)
         print(f'Saved recording {timestamp}.')

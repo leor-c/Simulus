@@ -13,6 +13,12 @@ def get_keymap_and_action_names(name: str, env):
     if name == 'atari':
         return ATARI_KEYMAP, ATARI_ACTION_NAMES
 
+    if name == 'craftax':
+        from craftax.craftax.play_craftax import KEY_MAPPING, Action
+        craftax_keymap = {k: v.value for k, v in KEY_MAPPING.items()}
+        craftax_action_names = [v.name for v in Action]
+        return craftax_keymap, craftax_action_names
+
     if 'minihack' in name.lower():
         return {a.value: i for i, a in enumerate(env.actions)}, [a.name for a in env.actions]
 

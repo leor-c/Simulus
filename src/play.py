@@ -10,7 +10,7 @@ from scipy.ndimage import rotate
 
 from main import build_agent
 from envs import SingleProcessEnv, POPWMEnv4Play
-from game import AgentEnv, EpisodeReplayEnv, Game
+from game import AgentEnv, CraftaxAgentEnv, EpisodeReplayEnv, Game
 from utils.preprocessing import get_obs_processor
 
 
@@ -29,6 +29,7 @@ def play_atari(cfg: DictConfig, mode, reconstruction_mode, header_info, fps, mod
         h, w = 64, 64
     multiplier = 800 // h
     size = [h * multiplier, w * multiplier]
+    print(f"size: {size}")
 
     if mode == 'episode_replay':
         env = EpisodeReplayEnv(replay_keymap_name=cfg.env.keymap, episode_dir=Path('media/episodes'))
@@ -64,81 +65,25 @@ def play_atari(cfg: DictConfig, mode, reconstruction_mode, header_info, fps, mod
 def play_craftax(cfg: DictConfig, fps: int, actions_info: bool, model_path: Path):
     device = torch.device(cfg.common.device)
     from envs.wrappers.craftax import make_craftax
-    from craftax.craftax.play_craftax import BLOCK_PIXEL_SIZE_HUMAN, CraftaxRenderer, Action
     env = SingleProcessEnv(make_craftax)
-    gymnax_env = env.env.env.env
-    jax_env = gymnax_env._env
 
-    recording = False
-    frames_buffer = []
-    record_dir = Path('media') / 'recordings'
-
-    obs, info = env.reset()
-    env_state = gymnax_env.env_state
-
+    # Determine the screen size:
+    from craftax.craftax.play_craftax import BLOCK_PIXEL_SIZE_HUMAN, OBS_DIM, INVENTORY_OBS_HEIGHT
     pixel_render_size = 64 // BLOCK_PIXEL_SIZE_HUMAN
+    width = OBS_DIM[1] * BLOCK_PIXEL_SIZE_HUMAN * pixel_render_size
+    height = (OBS_DIM[0] + INVENTORY_OBS_HEIGHT) * BLOCK_PIXEL_SIZE_HUMAN * pixel_render_size
+    screen_size = (height, width)
 
-    renderer = CraftaxRenderer(env, None, pixel_render_size=pixel_render_size)
-    print(f'screen size: {renderer.screen_size}')
-    renderer.render(env_state)
-
+    # Initialize the agent:
     agent = build_agent(env, cfg, device=device)
     if model_path is not None:
         agent.load(model_path, device, load_tokenizer=False, load_world_model=True, load_actor_critic=True)
-    agent.reset_actor_critic(1, None, None)
 
-    import pygame
-    pygame.key.set_repeat(0, 0)
-    clock = pygame.time.Clock()
+    # Set up the game wrappers:
+    env = CraftaxAgentEnv(agent, env, pixel_render_size=pixel_render_size)
 
-    print(f"Press 'R' to start/stop recording a video.")
-
-    obs_processors = {m: get_obs_processor(m) for m in env.modalities}
-
-    def obs_to_torch(obs):
-        assert isinstance(obs, dict)
-        assert set(obs.keys()) == set([m.name for m in env.modalities]), f"{set(obs.keys())} != {env.modalities}"
-        torch_obs = {m: obs_processors[m].to_torch(obs[m.name], device=device) for m in env.modalities}
-        processed_obs = {m: obs_processors[m](v) for m, v in torch_obs.items()}
-        return processed_obs
-
-    while not renderer.is_quit_requested():
-        is_record_key_pressed = any([(e.type == pygame.KEYDOWN and e.unicode == 'R') for e in renderer.pygame_events])
-        if is_record_key_pressed:
-            if not recording:
-                recording = True
-                print('Started recording.')
-            else:
-                print('Stopped recording.')
-                Game.save_recording(record_dir, np.stack(frames_buffer))
-                recording = False
-                frames_buffer = []
-
-        if recording:
-            frame = pygame.display.get_surface()
-            frame = np.fliplr(rotate(pygame.surfarray.array3d(frame), angle=-90))
-            frames_buffer.append(frame)
-
-        if env_state.is_sleeping or env_state.is_resting:
-            action = [Action.NOOP.value]
-        else:
-            action = agent.act(obs_to_torch(obs))
-            action = action.detach().cpu().numpy()
-            if actions_info:
-                print(f"Action: {action[0]} ({Action(action[0])})")
-
-        if action is not None:
-            obs, reward, terminated, truncated, info = env.step(action)
-            env_state = gymnax_env.env_state
-            renderer.render(env_state)
-
-            if terminated or truncated:
-                agent.reset_actor_critic(1, None, None)
-
-        renderer.update()
-        clock.tick(fps)
-
-    print(type(jax_env))
+    game = Game(env, keymap_name='empty', size=screen_size, fps=fps, verbose=True, record_mode=False)
+    game.run()
 
 
 def get_config(benchmark: str):
