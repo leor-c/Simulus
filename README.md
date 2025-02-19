@@ -15,7 +15,8 @@ Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Ma
 </div>
 
 <div align="center">
-<img src="https://github.com/user-attachments/assets/06471979-367a-4253-a554-9a543f630b46" height="300" />
+
+<img src="https://github.com/user-attachments/assets/32f547d1-198c-4cf4-8f4e-9f683250399a" height="350" />
 </div>
 
 
