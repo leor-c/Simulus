@@ -83,7 +83,7 @@ class CraftaxAgentEnv(AgentEnv):
     def __init__(self, agent: Agent, env: SingleProcessEnv, pixel_render_size: int = 4) -> None:
         super().__init__(agent, env, 'craftax', False)
         self.pixel_render_size = pixel_render_size
-        self.gymnax_env = env.env.env.env
+        self.gymnax_env = env.env.env.env.env
         import jax
         from craftax.craftax.renderer import render_craftax_pixels
         self._render = jax.jit(render_craftax_pixels, static_argnums=(1,))

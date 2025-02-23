@@ -1,9 +1,11 @@
 import os
+from typing import SupportsFloat, Any
+
 import numpy as np
 import torch
 import gymnasium
 from gymnasium import Env
-from gymnasium.core import ObsType, ActType, WrapperObsType
+from gymnasium.core import ObsType, ActType, WrapperObsType, WrapperActType
 
 from envs.wrappers.multi_modal import MultiModalObsWrapper, DictObsWrapper
 from utils import ObsModality
@@ -19,6 +21,7 @@ def make_craftax(id: str = "Craftax-Symbolic-v1"):
     env = make_craftax_env_from_name(id, auto_reset=True)
     env = GymnaxToGymWrapper(env)
     env = CraftaxWrapper(env)
+    env = InfoWrapper(env)
     env = MultiModalObsWrapper(env, obs_key_to_modality={
         'map': ObsModality.token_2d,
         'stats': ObsModality.vector,
@@ -77,5 +80,9 @@ class CraftaxWrapper(gymnasium.ObservationWrapper):
         return obs
 
 
+class InfoWrapper(gymnasium.Wrapper):
 
-
+    def step(self, action: WrapperActType) -> tuple[WrapperObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+        obs, reward, terminated, truncated, info = super().step(action)
+        info = {k: np.array(v).item() for k, v in info.items()}
+        return obs, reward, terminated, truncated, info

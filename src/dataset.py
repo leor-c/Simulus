@@ -554,6 +554,13 @@ class CuriousReplayDistribution:
         self.losses[self.last_sample] = batch_losses.to(self.device)
 
 
+def np_softmax(x, axis=-1):
+    x = x - np.max(x, axis=axis, keepdims=True)
+    x = np.exp(x) / np.sum(np.exp(x), axis=axis, keepdims=True)
+
+    return x
+
+
 class NpCuriousReplayDistribution:
     def __init__(
             self, uniform_portion: float = 0.7, replacement: bool = False,
@@ -568,7 +575,7 @@ class NpCuriousReplayDistribution:
 
     @property
     def distribution(self) -> np.ndarray:
-        losses_bonus = np.exp(self.losses)
+        losses_bonus = np_softmax(self.losses)
 
         assert not np.isnan(losses_bonus).any(), f"got nan losses bonus: {losses_bonus}"
         assert not np.isinf(losses_bonus).any(), f"got inf losses bonus: {losses_bonus}"
@@ -585,7 +592,7 @@ class NpCuriousReplayDistribution:
         replacement = False
         prioritized_bsz = math.ceil((1 - self.uniform_portion) * batch_size)
         dist = self.distribution
-        prioritized_sample = np.random.choice(dist.size, prioritized_bsz, replace=replacement, p=dist / dist.sum())
+        prioritized_sample = np.random.choice(dist.size, prioritized_bsz, replace=replacement, p=dist)
         p = np.ones(dist.size)
         p[prioritized_sample] = 0
         p = p / p.sum()

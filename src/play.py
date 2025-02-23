@@ -89,7 +89,10 @@ def play_craftax(cfg: DictConfig, fps: int, actions_info: bool, model_path: Path
 def get_config(benchmark: str):
     from hydra import compose, initialize
     initialize(version_base=None, config_path="../config", job_name="play")
-    overrides = [f"benchmark={benchmark}", 'hydra.run.dir=.', 'hydra.output_subdir=null']
+    overrides = ['hydra.run.dir=.', 'hydra.output_subdir=null']
+    should_override_benchmark = Path('config/benchmark').exists()
+    if should_override_benchmark:
+        overrides.append(f"benchmark={benchmark}")
     cfg = compose(config_name="base", overrides=overrides)
     return cfg
 
