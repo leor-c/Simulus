@@ -1,56 +1,52 @@
-#! python
+from typing import Optional
 
-import argparse
-from datetime import datetime
+import click
 from pathlib import Path
-import subprocess
-
-from omegaconf import OmegaConf
+import os
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-n', '--num-episodes', type=int, default=100, help='Number of evaluation episodes to collect.')
-    parser.add_argument('-p', '--num-envs', type=int, default=25, help='Number of environments used to collect the evaluation episodes.')
-    args = parser.parse_args()
+def eval_main(weights_path: Path, num_episodes: int, num_envs: int, seed: int, wandb_mode: str, benchmark: Optional[str] = None):
+    cmd = f'python src/main.py'
+    if benchmark is not None:
+        cmd += f' benchmark={benchmark}'
+    cmd += f' outputs_dir_path=eval_outputs'
+    cmd += ' training.should=False'
+    cmd += ' evaluation.should=True'
+    cmd += ' common.epochs=0'
+    cmd += f' common.seed={seed}'
+    cmd += ' common.metrics_only_mode=True'
 
-    path_to_config = Path('config') / 'config.yaml'
-    cfg = OmegaConf.load(path_to_config)
+    cmd += f' wandb.mode={wandb_mode}'
+    cmd += f' wandb.group=eval-{benchmark}'
 
-    path_to_checkpoint = Path('checkpoints') / 'last.pt'
-    assert path_to_checkpoint.is_file()
+    cmd += f' initialization.agent.path_to_checkpoint={str(weights_path.absolute())}'
+    cmd += ' initialization.agent.load_tokenizer=True'
+    cmd += ' initialization.agent.load_world_model=True'
+    cmd += ' initialization.agent.load_actor_critic=True'
 
-    cmd = f'python src/main.py hydra.run.dir=eval_outputs/{datetime.now().strftime("%Y-%m-%d/%H-%M-%S")} '
+    cmd += f' collection.test.num_envs={num_envs}'
+    cmd += f' collection.test.config.num_episodes_end={num_episodes}'
 
-    cmd += 'wandb.mode=online '
-    cmd += f'wandb.name=eval-{cfg.wandb.name} '
-    cmd += f'wandb.group=eval-{cfg.wandb.group} '
+    res = os.system(cmd)
+    if res != 0:
+        raise RuntimeError(f'Failed to run command: {cmd}\nTerminating...')
 
-    cmd += f'initialization.path_to_checkpoint={str(path_to_checkpoint.absolute())} '
-    cmd += 'initialization.load_tokenizer=True '
-    cmd += 'initialization.load_world_model=False '
-    cmd += 'initialization.load_actor_critic=True '
 
-    cmd += 'common.epochs=1 '
-    cmd += 'common.device=cuda:0 '
-    cmd += 'common.do_checkpoint=False '
-    cmd += 'common.seed=0 '
+@click.command()
+@click.option('-p', '--weights-path', type=click.Path(exists=True), default='checkpoints/last.pt')
+@click.option('-n', '--num-episodes', type=int, default=100)
+@click.option('-e', '--num-envs', type=int, default=20)
+@click.option('-s', '--seed', type=int, default=0)
+@click.option('-b', '--benchmark', default=None, type=click.Choice(['atari', 'dmc', 'craftax']))
+@click.option('-w', '--wandb-mode', default='online', type=click.Choice(['online', 'offline', 'disabled']))
+def main(weights_path, num_episodes, num_envs, seed, benchmark, wandb_mode):
+    should_override_benchmark = Path('config/benchmark').exists()
+    if not should_override_benchmark:
+        assert benchmark is None
+    else:
+        assert benchmark is not None
 
-    cmd += 'collection.test.num_episodes_to_save=0 '
-    cmd += f'collection.test.num_envs={args.num_envs} '
-    cmd += f'collection.test.config.num_episodes={args.num_episodes} '
-
-    cmd += 'training.should=False '
-
-    # Turn on data collection only
-    cmd += 'evaluation.should=True '
-    cmd += 'evaluation.every=1 '
-    cmd += 'evaluation.tokenizer.start_after_epochs=1 '
-    cmd += 'evaluation.tokenizer.save_reconstructions=False '
-    cmd += 'evaluation.world_model.start_after_epochs=1 '
-    cmd += 'evaluation.actor_critic.start_after_epochs=1 '
-
-    subprocess.run(cmd, shell=True, check=True)
+    eval_main(Path(weights_path), num_episodes, num_envs, seed, wandb_mode, benchmark)
 
 
 if __name__ == '__main__':

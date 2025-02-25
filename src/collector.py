@@ -108,7 +108,7 @@ class Collector:
             if self.env.num_envs > 1:
                 # only update at indices where the env hasn't terminated:
                 for i in range(self.env.num_envs):
-                    if not self.env.mask_new_dones[i]:
+                    if self.env.done_tracker[i] <= 1:
                         self.info[i] = info[i]
             else:
                 self.info = info
