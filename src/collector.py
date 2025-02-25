@@ -103,7 +103,15 @@ class Collector:
             if random.random() < epsilon:
                 act = self.heuristic.act(obs).cpu().numpy()
 
-            self.obs, reward, terminated, truncated, self.info = self.env.step(act)
+            self.obs, reward, terminated, truncated, info = self.env.step(act)
+
+            if self.env.num_envs > 1:
+                # only update at indices where the env hasn't terminated:
+                for i in range(self.env.num_envs):
+                    if not self.env.mask_new_dones[i]:
+                        self.info[i] = info[i]
+            else:
+                self.info = info
 
             actions.append(act)
             rewards.append(reward)
