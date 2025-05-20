@@ -2,7 +2,7 @@
 Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Mannor
 
 
-📄 [Paper](https://arxiv.org/abs/2502.11537)   ▪️   🧠 [Trained model weights](https://huggingface.co/leorc/M3)
+📄 [Paper](https://arxiv.org/abs/2502.11537)   ▪️   🧠 [Trained model weights](https://huggingface.co/leorc/Simulus)
 
 
 
