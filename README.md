@@ -1,4 +1,4 @@
-# M<sup>3</sup>: A Modular World Model over Streams of Tokens
+# Uncovering Untapped Potential in Sample-Efficient World Model Agents
 Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Mannor
 
 
@@ -35,7 +35,7 @@ docker compose up -d
 ```
 To access the command line of the container, run
 ```bash
-docker attach m3_c
+docker attach sim_c
 ```
 Use the container's command line to run the desired script (detailed below).
 You can detach from the container using `CTRL+D`, and stop the container using `docker compose down`.
@@ -94,7 +94,7 @@ to visualize the agent controlling the real environment live.
 For Atari, make sure to use the correct environment ID in the configuration by setting `env.train.id=<game_name>NoFrameSkip-v4` in `config/env/atari.yaml` (e.g., `env.train.id=DemonAttackNoFrameskip-v4`).
 For more options, use `python src/play.py --help` or see details below.
 
-For example, to visualize the Craftax agent, download `Craftax.pt` from our [HuggingFace repo](https://huggingface.co/leorc/M3), place it in `M3/checkpoints/Craftax.pt` and launch `python src/play.py craftax -p checkpoints/Craftax.pt` (from the attached Docker container).
+For example, to visualize the Craftax agent, download `Craftax.pt` from our [HuggingFace repo](https://huggingface.co/leorc/M3), place it in `Simulus/checkpoints/Craftax.pt` and launch `python src/play.py craftax -p checkpoints/Craftax.pt` (from the attached Docker container).
 
 
 ## 🛠️ Configuration
@@ -171,8 +171,8 @@ The folder `results/data/` contains raw scores (for each game, and for each trai
 
 ## 👉 Citation
 ```
-@misc{cohen2025m3,
-      title={$\text{M}^{\text{3}}$: A Modular World Model over Streams of Tokens}, 
+@misc{cohen2025uncovering,
+      title={Uncovering Untapped Potential in Sample-Efficient World Model Agents}, 
       author={Lior Cohen and Kaixin Wang and Bingyi Kang and Uri Gadot and Shie Mannor},
       year={2025},
       eprint={2502.11537},

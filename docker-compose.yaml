@@ -1,7 +1,7 @@
 services:
   m3:
     build: ./
-    container_name: m3_c
+    container_name: sim_c
     environment:
       - DISPLAY=$DISPLAY
     shm_size: '8gb'

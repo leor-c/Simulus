@@ -15,7 +15,7 @@ hydra:
 
 wandb:
   mode: online
-  project: m3
+  project: simulus
   entity: null
   name: null
   group: null
