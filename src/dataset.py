@@ -631,7 +631,7 @@ class NpCuriousReplayDistribution:
 class CuriousReplayBatchSampler(torch.utils.data.Sampler):
 
     def __init__(self, dist: CuriousReplayDistribution, batch_size: int) -> None:
-        super().__init__(None)
+        super().__init__()
         self.batch_size = batch_size
         self.dist = dist
 

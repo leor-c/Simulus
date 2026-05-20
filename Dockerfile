@@ -31,8 +31,8 @@ RUN python get_lpips.py
 
 RUN apt-get install -y libgl1-mesa-glx libosmesa6
 
-RUN pip install craftax
-RUN pip install numpy==1.24.2
+RUN pip install craftax==1.4.5
+RUN pip install numpy==1.26.4
 
 # RUN pip install git+https://github.com/leor-c/Kinetix-CPU.git
 
