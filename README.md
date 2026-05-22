@@ -1,4 +1,4 @@
-# Uncovering Untapped Potential in Sample-Efficient World Model Agents
+# Simulus: Combining Improvements in Sample-Efficient World Model Agents
 Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Mannor
 
 
