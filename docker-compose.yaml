@@ -1,12 +1,12 @@
 services:
-  m3:
+  simulus:
     build: ./
     container_name: sim_c
     environment:
       - DISPLAY=$DISPLAY
     shm_size: '8gb'
     volumes:
-      - .:/M3
+      - .:/simulus
       - /tmp/.X11-unix:/tmp/.X11-unix
     stdin_open: true # docker run -i
     tty: true        # docker run -t

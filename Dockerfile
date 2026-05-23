@@ -1,6 +1,6 @@
 FROM nvcr.io/nvidia/pytorch:24.10-py3
 
-WORKDIR /M3
+WORKDIR /simulus
 
 RUN apt-get update && apt-get -y install gcc
 
