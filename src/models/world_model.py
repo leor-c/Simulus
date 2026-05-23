@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from math import ceil
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 from loguru import logger
 from einops import rearrange
@@ -15,6 +15,12 @@ from torch import Tensor
 from dataset import Batch
 
 from .pop_retnet import POPRetNetDecoderLayer, POPRetNetDecoder
+from .pop_attention import (
+    POPTransformer,
+    KVCache as TransformerKVCache,
+    build_pop_mask,
+    build_prediction_positions,
+)
 from .tokenizer import HardCodedVectorTokenizer, MultiModalTokenizer
 from utils import (
     LossWithIntermediateLosses, RecurrentState, UniformVQ, sym_exp,
@@ -57,6 +63,22 @@ class RetNetConfig:
     @property
     def tokens_per_chunk(self):
         return self.blocks_per_chunk * self.tokens_per_block
+
+
+@dataclass
+class TransformerConfig:
+    max_blocks: int
+    num_layers: int
+    num_heads: int
+    embed_dim: int
+    dropout: float
+    blocks_per_chunk: int
+    pos_enc: str = 'sinusoidal'
+    pred_self_mask: str = 'causal'
+
+    @property
+    def max_tokens(self):
+        return self.embed_dim  # unused placeholder; kept for interface parity with RetNetConfig
 
 
 from torch.func import stack_module_state, functional_call
@@ -198,7 +220,8 @@ class POPWorldModel(nn.Module):
     def __init__(
             self, tokens_per_obs_dict: dict[ObsModality, int], obs_vocab_size: dict[ObsModality, int],
             action_encoder: ActionEncoder,
-            retnet_cfg: RetNetConfig, context_length: int = 2,
+            backbone_cfg: Union[RetNetConfig, TransformerConfig] = None,
+            context_length: int = 2,
             compute_states_parallel: bool = True, shared_embeddings: bool = True,
             shared_prediction_token: bool = False, obs_emb_dim: Optional[int] = None,
             enable_curiosity: bool = False, device=None, *args, **kwargs
@@ -207,12 +230,14 @@ class POPWorldModel(nn.Module):
         super().__init__()
         assert isinstance(tokens_per_obs, int)
         assert set(tokens_per_obs_dict.keys()) == set(obs_vocab_size.keys())
+        assert backbone_cfg is not None, "backbone_cfg must be provided (RetNetConfig or TransformerConfig)"
 
         self.tokens_per_obs = tokens_per_obs
         self.tokens_per_obs_dict = tokens_per_obs_dict
         self.tokens_per_action = action_encoder.action_sequence_length
         self.obs_vocab_size = obs_vocab_size
-        self.config = retnet_cfg
+        self.config = backbone_cfg
+        self.backbone = 'transformer' if isinstance(backbone_cfg, TransformerConfig) else 'retnet'
         self._device = device
         self.enable_curiosity = enable_curiosity
 
@@ -225,8 +250,8 @@ class POPWorldModel(nn.Module):
         )
 
         self.curiosity_head = nn.ModuleDict({k.name: EnsembleObsHead(
-            ensemble_size=4, 
-            embed_dim=retnet_cfg.embed_dim,
+            ensemble_size=4,
+            embed_dim=backbone_cfg.embed_dim,
             vocab_size=get_vocab_head_dim(vocab_size),
             device=device
         ) for k, vocab_size in obs_vocab_size.items()}) if enable_curiosity else None
@@ -234,19 +259,17 @@ class POPWorldModel(nn.Module):
         self.head_rewards = self._build_reward_head()
 
         self.head_ends = nn.Sequential(
-            # nn.ReLU(),
-            nn.Linear(retnet_cfg.embed_dim, retnet_cfg.embed_dim, device=device),
-            nn.LayerNorm(retnet_cfg.embed_dim, device=device),
+            nn.Linear(backbone_cfg.embed_dim, backbone_cfg.embed_dim, device=device),
+            nn.LayerNorm(backbone_cfg.embed_dim, device=device),
             nn.SiLU(),
-            nn.Linear(retnet_cfg.embed_dim, 2, device=device)
+            nn.Linear(backbone_cfg.embed_dim, 2, device=device)
         )
 
         self.context_length = context_length
-        self.config = retnet_cfg
 
         self.shared_embeddings = shared_embeddings
         self.obs_embeddings = nn.ModuleDict({
-            k.name: make_embeddings(vocab_size, retnet_cfg.embed_dim, device=device)
+            k.name: make_embeddings(vocab_size, backbone_cfg.embed_dim, device=device)
             for k, vocab_size in obs_vocab_size.items()
             if k != ObsModality.image or (not shared_embeddings)
         })
@@ -259,7 +282,10 @@ class POPWorldModel(nn.Module):
 
         self.action_encoder = action_encoder
 
-        self.placeholder_embeddings = nn.Embedding(self.tokens_per_block, retnet_cfg.embed_dim, device=device)
+        # For RetNet, placeholder_embeddings acts as learnable prediction tokens.
+        # For Transformer, POPTransformer owns its pred_tokens internally.
+        if self.backbone == 'retnet':
+            self.placeholder_embeddings = nn.Embedding(self.tokens_per_block, backbone_cfg.embed_dim, device=device)
         self.compute_states_parallel = compute_states_parallel
         self.compute_states_parallel_inference = False
         self.pred_tokens_version = 'shared' if shared_prediction_token else 'per-token'
@@ -298,20 +324,38 @@ class POPWorldModel(nn.Module):
         return "world_model"
 
     def _build_model(self):
-        decoder_layers = [
-            POPRetNetDecoderLayer(
-                self.config.embed_dim,
-                self.config.num_heads,
-                tokens_per_block=self.tokens_per_block,
-                dropout=self.config.dropout,
-                dim_feedforward=4 * self.config.embed_dim,
-                mask_type=self.config.mask_type,
-                decay_scale_min_num_blocks=self.config.decay_scale_min_num_blocks,
-                decay_scale_max_num_blocks=self.config.decay_scale_max_num_blocks,
-                device=self.device,
-            ) for _ in range(self.config.num_layers)
-        ]
-        return POPRetNetDecoder(decoder_layers)
+        cfg = self.config
+        if self.backbone == 'retnet':
+            decoder_layers = [
+                POPRetNetDecoderLayer(
+                    cfg.embed_dim,
+                    cfg.num_heads,
+                    tokens_per_block=self.tokens_per_block,
+                    dropout=cfg.dropout,
+                    dim_feedforward=4 * cfg.embed_dim,
+                    mask_type=cfg.mask_type,
+                    decay_scale_min_num_blocks=cfg.decay_scale_min_num_blocks,
+                    decay_scale_max_num_blocks=cfg.decay_scale_max_num_blocks,
+                    device=self.device,
+                ) for _ in range(cfg.num_layers)
+            ]
+            return POPRetNetDecoder(decoder_layers)
+        else:
+            # POPTransformer owns its embedding table and obs_head, but POPWorldModel
+            # bypasses them and uses its own multi-modal embeddings and per-modality heads.
+            # vocab_size=1 keeps those unused layers minimal.
+            return POPTransformer(
+                n_obs=self.tokens_per_obs,
+                n_act=self.tokens_per_action,
+                n_layers=cfg.num_layers,
+                d_model=cfg.embed_dim,
+                n_heads=cfg.num_heads,
+                d_ff=4 * cfg.embed_dim,
+                vocab_size=1,
+                dropout=cfg.dropout,
+                pos_enc=cfg.pos_enc,
+                pred_self_mask=cfg.pred_self_mask,
+            ).to(self.device)
 
     @property
     def device(self):
@@ -319,7 +363,9 @@ class POPWorldModel(nn.Module):
             self._device = next(self.parameters()).device
         return self._device
 
-    def get_empty_state(self) -> RecurrentState:
+    def get_empty_state(self) -> Optional[RecurrentState]:
+        if self.backbone == 'transformer':
+            return None  # KVCache is created on the first forward_inference call
         return RecurrentState(None, 0)
 
     @torch.no_grad()
@@ -395,20 +441,28 @@ class POPWorldModel(nn.Module):
         if initial_state is None:
             initial_state = self.get_empty_state()
 
-        assert isinstance(self._model, POPRetNetDecoder)
+        if self.backbone == 'transformer':
+            return self._compute_train_forward_parallel_transformer(tokens_emb, initial_state)
 
+        assert isinstance(self._model, POPRetNetDecoder)
         if self.compute_states_parallel:
             return self._compute_train_forward_parallel(tokens_emb, initial_state)
         else:
             return self._compute_train_forward_sequential(tokens_emb, initial_state)
 
     @torch.no_grad()
-    def forward_inference(self, tokens_emb: torch.FloatTensor, recurrent_state: Optional[RecurrentState] = None):
-        assert isinstance(self._model, POPRetNetDecoder)
-
+    def forward_inference(
+        self,
+        tokens_emb: torch.FloatTensor,
+        recurrent_state: Union[RecurrentState, TransformerKVCache, None] = None,
+    ):
         assert tokens_emb.shape[1] < self.config.max_blocks
-        tokens_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')
 
+        if self.backbone == 'transformer':
+            return self._forward_inference_transformer(tokens_emb, recurrent_state)
+
+        assert isinstance(self._model, POPRetNetDecoder)
+        tokens_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')
         assert tokens_emb.shape[1] > 1, 'unsupported length!'
 
         if not self.compute_states_parallel_inference:
@@ -471,13 +525,80 @@ class POPWorldModel(nn.Module):
             initial_state.n += tokens_emb_i.shape[1]
         return torch.cat(outs, dim=1)
 
-    def compute_next_obs_pred_latents(self, recurrent_state: RecurrentState):
-        assert recurrent_state is not None and isinstance(recurrent_state, RecurrentState)
+    def _compute_train_forward_parallel_transformer(self, tokens_emb: torch.FloatTensor, initial_state):
+        """
+        Training forward for the Transformer backbone.
+
+        Two-pass POP: context pass builds the KV cache, prediction pass runs
+        k*n prediction tokens.  Returns [B, k*(n+m), E] with layout
+        [pred_obs_outs | action_outs] per block — identical to the RetNet
+        output so all downstream heads work unchanged.
+        """
+        assert isinstance(self._model, POPTransformer)
+        bsz, k = tokens_emb.shape[:2]
+        n, m   = self.tokens_per_obs, self.tokens_per_action
+
+        flat_emb = tokens_emb.flatten(1, 2)                                  # [B, k*(n+m), E]
+        ctx_outs, ctx_cache = self._model.encode_embs_to_kv_cache(flat_emb)  # [B, T, E], KVCache
+        pred_outs = self._model.predict_latents(k, ctx_cache, flat_emb.device)  # [B, k, n, E]
+
+        action_outs = ctx_outs.view(bsz, k, n + m, self._model.d_model)[:, :, n:, :]
+        block_outs  = torch.cat([pred_outs, action_outs], dim=2)             # [B, k, n+m, E]
+        return block_outs.flatten(1, 2)                                      # [B, k*(n+m), E]
+
+    @torch.no_grad()
+    def _forward_inference_transformer(
+        self,
+        tokens_emb: torch.FloatTensor,
+        cache: Optional[TransformerKVCache],
+    ) -> TransformerKVCache:
+        """
+        Inference forward for the Transformer backbone.
+
+        Appends token embeddings to the KV cache.  On the first call (cache=None)
+        the full context is encoded via encode_embs_to_kv_cache; subsequent calls
+        append one [obs|act] block via append_block_embs.
+        Returns the updated KVCache (caller stores it as recurrent_state).
+        """
+        assert isinstance(self._model, POPTransformer)
+        block_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')
+        if cache is None:
+            _, cache = self._model.encode_embs_to_kv_cache(block_emb)
+        else:
+            cache = self._model.append_block_embs(cache, block_emb)
+        return cache
+
+    @torch.no_grad()
+    def forward_inference_and_predict(
+        self,
+        tokens_emb: torch.FloatTensor,   # [B, 1, n+m, E] — exactly one new block
+        cache: TransformerKVCache,
+    ) -> Tuple[TransformerKVCache, torch.Tensor]:
+        """
+        Transformer-only: append one [obs|act] block to the cache and run the next
+        prediction tokens in a single forward pass.
+        Returns (updated_cache, pred_latents [B, n, E]).
+        Equivalent to forward_inference then compute_next_obs_pred_latents but with
+        one forward pass through the transformer instead of two.
+        """
+        assert self.backbone == 'transformer' and isinstance(self._model, POPTransformer)
+        n = self.tokens_per_obs
+        block_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')   # [B, n+m, E]
+        return self._model.append_block_embs_and_predict_latents(
+            cache, block_emb[:, :n], block_emb[:, n:],
+        )
+
+    def compute_next_obs_pred_latents(self, recurrent_state: Union[RecurrentState, TransformerKVCache, None]):
+        if self.backbone == 'transformer':
+            assert isinstance(recurrent_state, TransformerKVCache), \
+                "Transformer backbone expects a KVCache as recurrent_state"
+            return self._model.predict_next_latents(recurrent_state), None
+
+        assert isinstance(recurrent_state, RecurrentState) and recurrent_state is not None
         assert len(recurrent_state.state) > 0 and recurrent_state.state[0] is not None
         batch_size = recurrent_state.state[0].shape[0]
         device = recurrent_state.state[0].device
         pred_tokens_emb = self._get_prediction_tokens_embeddings(batch_size, 1, device, obs_only=True)
-    
         return self._model.forward_chunkwise(pred_tokens_emb, recurrent_state.n, recurrent_state.state)
 
     def _get_prediction_tokens_embeddings(self, batch_size: int, num_steps: int, device, obs_only: bool = False):

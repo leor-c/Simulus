@@ -1,3 +1,4 @@
+max_blocks: 20
 retnet:
   _target_: models.RetNetConfig
   max_blocks: 20

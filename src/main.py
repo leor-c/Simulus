@@ -14,10 +14,12 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 import torch
 import torch.nn as nn
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
-from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
-allow_ops_in_compiled_graph()
+# import torch._dynamo
+# torch._dynamo.config.suppress_errors = True
+# torch.backends.cuda.enable_flash_sdp(False)
+# torch.backends.cuda.enable_mem_efficient_sdp(False)
+# from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
+# allow_ops_in_compiled_graph()
 torch.set_printoptions(profile='short', sci_mode=False)
 from tqdm import tqdm
 import wandb
@@ -84,7 +86,7 @@ def build_agent(env, cfg, device):
         vgg_lpips_rel_path = cfg.tokenizer.image.vgg_lpips_ckpt_path
         cfg.tokenizer.image.vgg_lpips_ckpt_path = (project_root / vgg_lpips_rel_path).absolute()
         tokenizers[ObsModality.image] = instantiate(cfg.tokenizer.image)
-        tokenizers[ObsModality.image].compile()
+        # tokenizers[ObsModality.image].compile()
 
         ac_encoders[ObsModality.image] = ImageLatentObsEncoder(
             tokens_per_obs=tokenizers[ObsModality.image].tokens_per_obs,
@@ -126,6 +128,14 @@ def build_agent(env, cfg, device):
         tokenizers.keys()) == env.modalities, f"Modalities mismatch: env: {env.modalities}, tokenizers: {tokenizers.keys()}"
     tokenizer = MultiModalTokenizer(tokenizers=tokenizers)
 
+    # Resolve backbone config — either 'transformer' or 'retnet' sub-config.
+    if hasattr(cfg.world_model, 'transformer') and cfg.world_model.transformer is not None:
+        backbone_cfg = instantiate(cfg.world_model.transformer)
+        embed_dim = cfg.world_model.transformer.embed_dim
+    else:
+        backbone_cfg = instantiate(cfg.world_model.retnet)
+        embed_dim = cfg.world_model.retnet.embed_dim
+
     # Init world model + controller:
     if is_continuous_env:
         assert len(env.action_space.shape) == 1
@@ -133,7 +143,7 @@ def build_agent(env, cfg, device):
         action_encoder = ContinuousActionEncoder(
             action_dim=action_dim,
             action_vocab_size=cfg.actor_critic.n_action_quant_levels,
-            embed_dim=cfg.world_model.retnet.embed_dim,
+            embed_dim=embed_dim,
             device=device,
             tokenize_actions=cfg.world_model.tokenize_actions,
         )
@@ -147,7 +157,7 @@ def build_agent(env, cfg, device):
     elif isinstance(env.action_space, gymnasium.spaces.MultiDiscrete):
         action_encoder = MultiDiscreteActionEncoder(
             nvec=env.action_space.nvec,
-            embed_dim=cfg.world_model.retnet.embed_dim,
+            embed_dim=embed_dim,
             device=device,
         )
         actor_critic = MultiDiscreteActorCriticLS(
@@ -161,7 +171,7 @@ def build_agent(env, cfg, device):
         assert isinstance(env.action_space, gymnasium.spaces.Discrete)
         action_encoder = DiscreteActionEncoder(
             num_actions=env.num_actions,
-            embed_dim=cfg.world_model.retnet.embed_dim,
+            embed_dim=embed_dim,
             device=device,
         )
         actor_critic = DiscreteActorCriticLS(
@@ -172,16 +182,18 @@ def build_agent(env, cfg, device):
             device=device
         )
 
+    # Strip backbone sub-configs from kwargs — only the instantiated backbone_cfg is passed.
+    wm_extra_cfg = {k: v for k, v in cfg.world_model.items() if k not in ('retnet', 'transformer')}
     world_model = POPWorldModel(
         tokens_per_obs_dict=tokenizer.tokens_per_obs_dict,
         obs_vocab_size=tokenizer.vocab_size,
         action_encoder=action_encoder,
-        retnet_cfg=instantiate(cfg.world_model.retnet),
+        backbone_cfg=backbone_cfg,
         device=device,
-        **cfg.world_model
+        **wm_extra_cfg
     )
-    world_model.compile()
-    actor_critic.compile()
+    # world_model.compile()
+    # actor_critic.compile()
 
     return Agent(tokenizer, world_model, actor_critic)
 

@@ -1,1 +1,1 @@
-from .world_model import RetNetConfig, POPWorldModel
+from .world_model import RetNetConfig, TransformerConfig, POPWorldModel

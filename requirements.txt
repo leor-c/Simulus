@@ -11,10 +11,11 @@ wandb>=0.15.9
 nltk==3.8.1
 loguru
 yet-another-retnet>=0.5.0
-numpy==1.24.2
+numpy>=1.26.4
 rliable
 dm_control==1.0.19
 dm-env==1.6
 mujoco==3.1.5
 mujoco-utils==0.0.6
 imageio[ffmpeg]
+rotary-embedding-torch>=0.8.9

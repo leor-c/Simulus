@@ -35,7 +35,8 @@ def configure_optimizer(model, learning_rate, weight_decay):
             no_decay.add(pn)
         elif 'norm' in pn:
             no_decay.add(pn)
-        elif 'embedding' in param_names_lst or 'embed' in pn or 'pos_emb' in pn:
+        elif ('embedding' in param_names_lst or 'embed' in pn or 'pos_emb' in pn
+              or 'pred_tokens' in param_names_lst or 'rotary_emb' in param_names_lst):
             no_decay.add(pn)
         elif re.search(layer_norm_pattern, pn) is not None:
             no_decay.add(pn)
@@ -422,7 +423,7 @@ class CategoricalRegressionHead(nn.Module):
 
         return out
 
-    @torch.compile()
+    # @torch.compile()
     def _compute_output(self, x: Tensor) -> Tensor:
         logits = self.linear(x)
         out = einsum(torch.softmax(logits, -1), self.support, '... k, k -> ...')

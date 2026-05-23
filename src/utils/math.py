@@ -24,7 +24,7 @@ def base_10_to_base_n(x, n, num_digits):
     return torch.stack(digits, dim=-1).long()
 
 
-@torch.compile()
+# @torch.compile()
 def atanh(x):
     return 0.5 * (x.log1p() - (-x).log1p())
 

@@ -12,6 +12,7 @@ import torchvision
 from utils import RecurrentState, ObsModality
 from models.world_model import POPWorldModel
 from models.tokenizer import MultiModalTokenizer
+from models.pop_attention import KVCache as TransformerKVCache
 
 
 def np_obs_to_tensor(obs, device):
@@ -79,7 +80,7 @@ class POPWorldModelEnv:
         action_seq_len = self.world_model.tokens_per_action
         assert (num_ctx_tokens + action_seq_len) % self.world_model.tokens_per_block == 0
 
-        self.recurrent_state = RecurrentState(None, 0)
+        self.recurrent_state = self.world_model.get_empty_state()
         self.prior_context = ctx_tokens_emb
 
         return ctx_tokens_emb[:, -self._tokens_per_obs:]
@@ -87,7 +88,10 @@ class POPWorldModelEnv:
     def query_world_model(self, tokens_emb):
         assert tokens_emb.dim() == 3
         tokens_emb = rearrange(tokens_emb, 'b (t k1) e -> b t k1 e', k1=self.world_model.tokens_per_block)
-        return self.world_model.forward_inference(tokens_emb, recurrent_state=self.recurrent_state)
+        result = self.world_model.forward_inference(tokens_emb, recurrent_state=self.recurrent_state)
+        if isinstance(result, TransformerKVCache):
+            self.recurrent_state = result
+        return result
 
     @torch.no_grad()
     def _compute_reward_and_done(self, outputs_wm: torch.Tensor):
@@ -101,6 +105,21 @@ class POPWorldModelEnv:
         ends = ends.reshape(-1)  # (B,)
 
         return rewards, ends
+
+    def _sample_obs_and_rewards(self, preds: torch.Tensor):
+        """Shared tail of _compute_next_obs_tokens: sample tokens/rewards from pred latents."""
+        next_obs_tokens = self.world_model.sample_obs_tokens(preds)
+        rewards, ends = self.world_model.sample_rewards_ends(preds)
+        if self.world_model.enable_curiosity:
+            d = self.world_model.tokens_per_obs_dict
+            preds = torch.split(preds, [d[m] for m in self.world_model.ordered_modalities], dim=1)
+            intrinsic_reward = torch.cat([
+                self.world_model.curiosity_head[m.name].estimate_uncertainty(preds[i])[0].mean(-1, keepdim=True)
+                for i, m in enumerate(self.world_model.ordered_modalities)
+            ], dim=-1).sum(dim=-1, keepdim=True)
+            assert rewards.shape == intrinsic_reward.shape, f"{rewards.shape}; {intrinsic_reward.shape}"
+            rewards = self.real_reward_weight * rewards + self.intrinsic_reward_weight * intrinsic_reward
+        return next_obs_tokens, rewards, ends
 
     def _embed_action(self, action):
         if isinstance(action, torch.Tensor):
@@ -117,7 +136,7 @@ class POPWorldModelEnv:
     def step(self, action: Union[int, np.ndarray, torch.LongTensor], should_predict_next_obs: bool = True,
              return_tokens: bool = False):
         assert (
-                (self.keys_values_wm is not None or self.recurrent_state is not None)
+                (self.keys_values_wm is not None or self.recurrent_state is not None or self.prior_context is not None)
                 and
                 self.tokens_per_obs is not None
         )
@@ -128,9 +147,19 @@ class POPWorldModelEnv:
             tokens_emb = torch.cat([self.prior_context, action_emb], dim=1)
         else:
             tokens_emb = action_emb
-        outputs_wm = self.query_world_model(tokens_emb)
 
-        self.last_obs_tokens, reward, done = self._compute_next_obs_tokens(outputs_wm)
+        if isinstance(self.recurrent_state, TransformerKVCache) and self.prior_context is not None:
+            # Combined path: append [obs|act] to the KV cache and predict the next
+            # observation in a single forward pass instead of two separate ones.
+            tokens_emb_4d = rearrange(tokens_emb, 'b (t k1) e -> b t k1 e',
+                                      k1=self.world_model.tokens_per_block)
+            self.recurrent_state, pred_latents = self.world_model.forward_inference_and_predict(
+                tokens_emb_4d, self.recurrent_state,
+            )
+            self.last_obs_tokens, reward, done = self._sample_obs_and_rewards(pred_latents)
+        else:
+            outputs_wm = self.query_world_model(tokens_emb)
+            self.last_obs_tokens, reward, done = self._compute_next_obs_tokens(outputs_wm)
         if self.world_model.uses_pop:
             obs_tokens = {k: v.unsqueeze(1) for k, v in self.last_obs_tokens.items()}
             self.prior_context = self.world_model.embed_obs_tokens(obs_tokens, self.tokenizer).squeeze(1)
@@ -142,22 +171,9 @@ class POPWorldModelEnv:
 
     def _compute_next_obs_tokens(self, last_wm_output: torch.Tensor):
         if self.world_model.compute_states_parallel_inference:
-            # preds = last_wm_output[:, -self.world_model.tokens_per_block:-self.world_model.tokens_per_action]
             raise NotImplementedError()
-        else:
-            preds = self.world_model.compute_next_obs_pred_latents(self.recurrent_state)[0]
-        next_obs_tokens = self.world_model.sample_obs_tokens(preds)
-        rewards, ends = self.world_model.sample_rewards_ends(preds)
-        if self.world_model.enable_curiosity:
-            d = self.world_model.tokens_per_obs_dict
-            preds = torch.split(preds, [d[m] for m in self.world_model.ordered_modalities], dim=1)
-            intrinsic_reward = torch.cat([
-                self.world_model.curiosity_head[m.name].estimate_uncertainty(preds[i])[0].mean(-1, keepdim=True)
-                for i, m in enumerate(self.world_model.ordered_modalities)
-            ], dim=-1).sum(dim=-1, keepdim=True)
-            assert rewards.shape == intrinsic_reward.shape, f"{rewards.shape}; {intrinsic_reward.shape}"
-            rewards = self.real_reward_weight * rewards + self.intrinsic_reward_weight * intrinsic_reward
-        return next_obs_tokens, rewards, ends
+        preds = self.world_model.compute_next_obs_pred_latents(self.recurrent_state)[0]
+        return self._sample_obs_and_rewards(preds)
 
     @torch.no_grad()
     def render_batch(self) -> List[Image.Image]:

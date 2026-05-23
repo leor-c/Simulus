@@ -38,7 +38,7 @@ common:
   do_checkpoint: True
   metrics_only_mode: False
   seed: 1
-  sequence_length: ${world_model.retnet.max_blocks}
+  sequence_length: ${world_model.max_blocks}
   resume: False # set by resume.sh script only.
   float32_matmul_precision: 'highest'
   num_dataloader_workers: 2
