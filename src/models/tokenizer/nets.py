@@ -8,6 +8,7 @@ from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 @dataclass
@@ -22,6 +23,19 @@ class EncoderDecoderConfig:
     out_ch: int
     dropout: float
     interp_mode: str
+    use_mid_block: bool = True
+
+    @property
+    def num_downsample_steps(self) -> int:
+        return len(self.ch_mult) - 1
+
+    @property
+    def input_resolution(self) -> tuple:
+        return (self.resolution, self.resolution)
+
+    @property
+    def out_channels(self) -> int:
+        return self.z_channels
 
 
 class Encoder(nn.Module):
@@ -63,16 +77,17 @@ class Encoder(nn.Module):
             self.down.append(down)
 
         # middle
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(in_channels=block_in,
-                                       out_channels=block_in,
-                                       temb_channels=temb_ch,
-                                       dropout=config.dropout)
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(in_channels=block_in,
-                                       out_channels=block_in,
-                                       temb_channels=temb_ch,
-                                       dropout=config.dropout)
+        if config.use_mid_block:
+            self.mid = nn.Module()
+            self.mid.block_1 = ResnetBlock(in_channels=block_in,
+                                           out_channels=block_in,
+                                           temb_channels=temb_ch,
+                                           dropout=config.dropout)
+            self.mid.attn_1 = AttnBlock(block_in)
+            self.mid.block_2 = ResnetBlock(in_channels=block_in,
+                                           out_channels=block_in,
+                                           temb_channels=temb_ch,
+                                           dropout=config.dropout)
 
         # end
         self.norm_out = Normalize(block_in)
@@ -99,9 +114,10 @@ class Encoder(nn.Module):
 
         # middle
         h = hs[-1]
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        if self.config.use_mid_block:
+            h = self.mid.block_1(h, temb)
+            h = self.mid.attn_1(h)
+            h = self.mid.block_2(h, temb)
 
         # end
         h = self.norm_out(h)
@@ -121,7 +137,6 @@ class Decoder(nn.Module):
         in_ch_mult = (1,) + tuple(config.ch_mult)
         block_in = config.ch * config.ch_mult[self.num_resolutions - 1]
         curr_res = config.resolution // 2 ** (self.num_resolutions - 1)
-        print(f"Tokenizer : shape of latent is {config.z_channels, curr_res, curr_res}.")
 
         # z to block_in
         self.conv_in = torch.nn.Conv2d(config.z_channels,
@@ -131,16 +146,17 @@ class Decoder(nn.Module):
                                        padding=1)
 
         # middle
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(in_channels=block_in,
-                                       out_channels=block_in,
-                                       temb_channels=temb_ch,
-                                       dropout=config.dropout)
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(in_channels=block_in,
-                                       out_channels=block_in,
-                                       temb_channels=temb_ch,
-                                       dropout=config.dropout)
+        if config.use_mid_block:
+            self.mid = nn.Module()
+            self.mid.block_1 = ResnetBlock(in_channels=block_in,
+                                           out_channels=block_in,
+                                           temb_channels=temb_ch,
+                                           dropout=config.dropout)
+            self.mid.attn_1 = AttnBlock(block_in)
+            self.mid.block_2 = ResnetBlock(in_channels=block_in,
+                                           out_channels=block_in,
+                                           temb_channels=temb_ch,
+                                           dropout=config.dropout)
 
         # upsampling
         self.up = nn.ModuleList()
@@ -179,9 +195,10 @@ class Decoder(nn.Module):
         h = self.conv_in(z)
 
         # middle
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        if self.config.use_mid_block:
+            h = self.mid.block_1(h, temb)
+            h = self.mid.attn_1(h)
+            h = self.mid.block_2(h, temb)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
@@ -253,14 +270,14 @@ class Downsample(nn.Module):
 
 class ResnetBlock(nn.Module):
     def __init__(self, *, in_channels: int, out_channels: int = None, conv_shortcut: bool = False,
-                 dropout: float, temb_channels: int = 512) -> None:
+                 dropout: float, temb_channels: int = 512, num_groups: int = 32) -> None:
         super().__init__()
         self.in_channels = in_channels
         out_channels = in_channels if out_channels is None else out_channels
         self.out_channels = out_channels
         self.use_conv_shortcut = conv_shortcut
 
-        self.norm1 = Normalize(in_channels)
+        self.norm1 = Normalize(in_channels, num_groups)
         self.conv1 = torch.nn.Conv2d(in_channels,
                                      out_channels,
                                      kernel_size=3,
@@ -269,7 +286,7 @@ class ResnetBlock(nn.Module):
         if temb_channels > 0:
             self.temb_proj = torch.nn.Linear(temb_channels,
                                              out_channels)
-        self.norm2 = Normalize(out_channels)
+        self.norm2 = Normalize(out_channels, num_groups)
         self.dropout = torch.nn.Dropout(dropout)
         self.conv2 = torch.nn.Conv2d(out_channels,
                                      out_channels,
@@ -314,11 +331,11 @@ class ResnetBlock(nn.Module):
 
 
 class AttnBlock(nn.Module):
-    def __init__(self, in_channels: int) -> None:
+    def __init__(self, in_channels: int, num_groups: int = 32) -> None:
         super().__init__()
         self.in_channels = in_channels
 
-        self.norm = Normalize(in_channels)
+        self.norm = Normalize(in_channels, num_groups)
         self.q = torch.nn.Conv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
@@ -341,27 +358,19 @@ class AttnBlock(nn.Module):
                                         padding=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h_ = x
-        h_ = self.norm(h_)
+        h_ = self.norm(x)
         q = self.q(h_)
         k = self.k(h_)
         v = self.v(h_)
 
-        # compute attention
         b, c, h, w = q.shape
-        q = q.reshape(b, c, h * w)
-        q = q.permute(0, 2, 1)      # b,hw,c
-        k = k.reshape(b, c, h * w)  # b,c,hw
-        w_ = torch.bmm(q, k)        # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
-        w_ = w_ * (int(c) ** (-0.5))
-        w_ = torch.nn.functional.softmax(w_, dim=2)
+        # reshape to (b, 1, hw, c) for scaled_dot_product_attention
+        q = q.reshape(b, c, h * w).permute(0, 2, 1).unsqueeze(1)
+        k = k.reshape(b, c, h * w).permute(0, 2, 1).unsqueeze(1)
+        v = v.reshape(b, c, h * w).permute(0, 2, 1).unsqueeze(1)
 
-        # attend to values
-        v = v.reshape(b, c, h * w)
-        w_ = w_.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
-        h_ = torch.bmm(v, w_)     # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
-        h_ = h_.reshape(b, c, h, w)
-
+        h_ = F.scaled_dot_product_attention(q, k, v)
+        h_ = h_.squeeze(1).permute(0, 2, 1).reshape(b, c, h, w)
         h_ = self.proj_out(h_)
 
         return x + h_
@@ -454,7 +463,7 @@ class SimpleDecoder(nn.Module):
         code_dim = latent_dim * (2 ** config.num_downsample_steps)
 
         in_conv = nn.Sequential(
-            nn.BatchNorm2d(config.out_channels),
+            Normalize(in_channels=config.out_channels, num_groups=config.norm_num_groups),
             nn.Conv2d(
                 in_channels=config.out_channels,
                 out_channels=code_dim,

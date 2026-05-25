@@ -1,8 +1,14 @@
 _target_: models.tokenizer.ImageTokenizer
 
-vocab_size: 512
 embed_dim: ${.encoder.config.out_channels}
 vgg_lpips_ckpt_path: "cache/rem/tokenizer_pretrained_vgg"
+fsq_levels: [8, 8, 8]   # FSQ: vocab_size = 8^3 = 512; set to null to use VQ+EMA instead
+
+# VQ+EMA params (only used when fsq_levels is null):
+vocab_size: 512
+ema_decay: 0.99
+commitment_beta: 1.0   # taming-transformers convention: equal to codebook weight
+
 encoder:
   _target_: models.tokenizer.SimpleEncoder
   config:
@@ -11,7 +17,7 @@ encoder:
     out_channels: 256
     out_channels_1st_layer: 64
     input_resolution: [64, 64]
-    num_downsample_steps: 3  # 4 ( --> 4x4), 3 --> 8x8
+    num_downsample_steps: 3  # 64×64 → 8×8
     norm_num_groups: 8
     downsample_use_conv: True
 

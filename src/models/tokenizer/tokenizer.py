@@ -18,7 +18,6 @@ from torch import Tensor
 
 from dataset import Batch
 from .lpips import LPIPS
-from .nets import SimpleEncoder, SimpleDecoder
 from utils import (
     LossWithIntermediateLosses, VectorQuantizer, ObsModality
 )
@@ -90,26 +89,103 @@ def _combine_encoder_outputs(outputs: list[TokenizerEncoderOutput], input_shape=
     return results
 
 
+class FSQ(nn.Module):
+    """Finite Scalar Quantization (Mentzer et al., ICLR 2024).
+
+    Each latent dimension is independently quantized to L_i evenly-spaced integer levels.
+    No learned codebook, no EMA, no commitment loss — codebook utilization is near-100%
+    by construction.
+
+    Example: levels=[8, 8, 8] → vocab_size = 8³ = 512, num_dims = 3.
+    """
+
+    def __init__(self, levels: list[int]) -> None:
+        super().__init__()
+        levels_t = torch.tensor(levels, dtype=torch.long)
+        basis = torch.cumprod(
+            torch.cat([torch.ones(1, dtype=torch.long), levels_t[:-1]]), dim=0
+        )
+        self.register_buffer('_levels', levels_t)
+        self.register_buffer('_basis', basis)
+        self.num_dims = len(levels)
+        self.vocab_size = int(levels_t.prod().item())
+
+    def _bound(self, z: torch.Tensor) -> torch.Tensor:
+        half_l = (self._levels.float() - 1) * (1 + 1e-3) / 2
+        offset = torch.where(
+            self._levels % 2 == 0,
+            torch.full_like(self._levels, 0.5, dtype=torch.float),
+            torch.zeros_like(self._levels, dtype=torch.float),
+        )
+        shift = torch.atan(offset / half_l)
+        return (z + shift).tanh() * half_l - offset
+
+    def quantize(self, z: torch.Tensor) -> torch.Tensor:
+        """Quantize with straight-through estimator. z: (..., num_dims)"""
+        z_b = self._bound(z)
+        return z_b + (z_b.round() - z_b).detach()
+
+    def codes_to_indices(self, codes: torch.Tensor) -> torch.Tensor:
+        """Quantized codes (..., num_dims) → integer token indices (...)."""
+        half_l = self._levels // 2
+        int_codes = (codes + half_l.float()).round().long()
+        return (int_codes * self._basis).sum(dim=-1)
+
+    def indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
+        """Integer token indices (...) → quantized codes (..., num_dims)."""
+        half_l = self._levels // 2
+        int_codes = (indices.unsqueeze(-1) // self._basis) % self._levels
+        return (int_codes.float() - half_l.float())
+
+    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """z: (..., num_dims) → (quantized_codes (..., num_dims), indices (...))"""
+        codes = self.quantize(z)
+        indices = self.codes_to_indices(codes)
+        return codes, indices
+
+
 class ImageTokenizer(TokenizerBase):
     def __init__(
-            self, vocab_size: int, embed_dim: int, vgg_lpips_ckpt_path: str, encoder: SimpleEncoder,
-            decoder: SimpleDecoder, with_lpips: bool = True, device=None
+            self, vocab_size: int, embed_dim: int, vgg_lpips_ckpt_path: str, encoder: nn.Module,
+            decoder: nn.Module, with_lpips: bool = True, device=None,
+            fsq_levels: Optional[list[int]] = None,
+            # VQ-only params (ignored when fsq_levels is set):
+            ema_decay: float = 0.99, commitment_beta: float = 1.0,
     ) -> None:
         super().__init__()
-        self.vocab_size = vocab_size
         self.encoder = encoder.to(device)
-        self.pre_quant_conv = nn.Identity()  # torch.nn.Conv2d(encoder.config.z_channels, embed_dim, 1)
-        self.embedding = nn.Embedding(vocab_size, embed_dim, device=device)
-        self.post_quant_conv = nn.Identity()  # torch.nn.Conv2d(embed_dim, decoder.config.z_channels, 1)
         self.decoder = decoder.to(device)
-        self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
         self.lpips = LPIPS(vgg_lpips_ckpt_path).eval().to(device) if with_lpips else None
+
+        if fsq_levels is not None:
+            d = len(fsq_levels)
+            self.fsq = FSQ(list(fsq_levels)).to(device)
+            self.pre_quant_conv = nn.Conv2d(embed_dim, d, 1, device=device)
+            self.post_quant_conv = nn.Conv2d(d, embed_dim, 1, device=device)
+            self._vocab_size = self.fsq.vocab_size
+            self.embedding = None
+        else:
+            self.fsq = None
+            self.pre_quant_conv = nn.Identity()
+            self.post_quant_conv = nn.Identity()
+            self.embedding = nn.Embedding(vocab_size, embed_dim, device=device)
+            self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+            self._vocab_size = vocab_size
+            self._ema_decay = ema_decay
+            self._commitment_beta = commitment_beta
+            if ema_decay > 0:
+                self.register_buffer('_ema_cluster_size', torch.zeros(vocab_size, device=device))
+                self.register_buffer('_ema_embed_avg', self.embedding.weight.data.clone())
 
         self._effective_bsz = None
         self._past_err_msgs = []
 
     def __repr__(self) -> str:
         return "tokenizer"
+
+    @property
+    def vocab_size(self) -> int:
+        return self._vocab_size
 
     @property
     def modality(self) -> ObsModality:
@@ -126,19 +202,19 @@ class ImageTokenizer(TokenizerBase):
 
     def forward(self, x: Tensor, should_preprocess: bool = False, should_postprocess: bool = False,
                 return_tokens: bool = False) -> Tuple[Tensor, ...]:
-        outputs = self.encode(x, should_preprocess)
-        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
-        reconstructions = self.decode(decoder_input, should_postprocess)
+        outputs = self.encode(x, should_preprocess)  # z and z_quantized are both embed_dim
+        if self.fsq is not None:
+            reconstructions = self.decode(outputs.z_quantized, should_postprocess)
+        else:
+            # VQ straight-through estimator
+            decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
+            reconstructions = self.decode(decoder_input, should_postprocess)
         if return_tokens:
             return outputs.z, outputs.z_quantized, reconstructions, outputs.tokens
         return outputs.z, outputs.z_quantized, reconstructions
 
     def _auto_adjust_bsz_call(self, x: Tensor, fn, combine_results_fn, **kwargs):
-        """
-        Automatically adjust the effective batch size and call `fn` with apropriate input sized batch.
-        in case the input is too large, split the computation into multiple (sequential) calls
-        of smaller size.
-        """
+        """Split oversized batches into sequential mini-batches to avoid OOM."""
         input_shape = x.shape
         x = x.reshape(-1, *input_shape[-3:])
         input_bsz = x.shape[0]
@@ -147,7 +223,6 @@ class ImageTokenizer(TokenizerBase):
             try:
                 num_mini_batches = math.ceil(input_bsz / bsz)
                 results = [fn(x[i * bsz:(i+1) * bsz], **kwargs) for i in range(num_mini_batches)]
-
                 results = combine_results_fn(results, input_shape)
                 if bsz < input_bsz and self._effective_bsz is None:
                     self._effective_bsz = bsz
@@ -158,42 +233,63 @@ class ImageTokenizer(TokenizerBase):
                     self._past_err_msgs.append(err_msg)
                     logger.warning(err_msg)
                 bsz = bsz // 2
-
         raise RuntimeError('No batch size fits the available memory!')
 
     def compute_loss(self, batch: Batch, **kwargs: Any) -> tuple[LossWithIntermediateLosses, dict]:
-        # assert self.lpips is not None
         obs = batch['observations'][ObsModality.image]
-        t = obs.shape[1]
-        b = obs.shape[0]
-        assert t == 1
+        assert obs.shape[1] == 1
         observations = self.preprocess_input(rearrange(obs, 'b t c h w -> (b t) c h w'))
-        z, z_quantized, reconstructions, tokens = self(observations, should_preprocess=False, should_postprocess=False, return_tokens=True)
+        z, z_quantized, reconstructions, tokens = self(
+            observations, should_preprocess=False, should_postprocess=False, return_tokens=True
+        )
 
-        # Codebook loss. Notes:
-        # - beta position is different from taming and identical to original VQVAE paper
-        # - VQVAE uses 0.25 by default
-        beta = 1.0
-        z = z.reshape(b, -1)
-        z_quantized = z_quantized.reshape(b, -1)
-        commitment_loss = F.mse_loss(z_quantized, z.detach()) + beta * F.mse_loss(z, z_quantized.detach())
-
-        if self.lpips is not None:
-            perceptual_loss = self.lpips(observations, reconstructions).flatten()
-            perceptual_loss = torch.mean(perceptual_loss)
+        if self.fsq is not None:
+            loss_dict = {}
         else:
-            perceptual_loss = torch.zeros_like(commitment_loss)
+            z_flat = rearrange(z, 'b e h w -> (b h w) e')
+            z_q_flat = rearrange(z_quantized, 'b e h w -> (b h w) e')
+            tokens_flat = tokens.reshape(-1)
+
+            if self._ema_decay > 0 and self.training:
+                with torch.no_grad():
+                    one_hot = F.one_hot(tokens_flat, self._vocab_size).float()
+                    new_cluster_size = one_hot.sum(0)
+                    new_embed_sum = one_hot.t() @ z_flat
+
+                    self._ema_cluster_size.mul_(self._ema_decay).add_(new_cluster_size * (1 - self._ema_decay))
+                    self._ema_embed_avg.mul_(self._ema_decay).add_(new_embed_sum * (1 - self._ema_decay))
+
+                    n = self._ema_cluster_size.sum()
+                    smoothed = (self._ema_cluster_size + 1e-5) / (n + self._vocab_size * 1e-5) * n
+                    self.embedding.weight.data.copy_(self._ema_embed_avg / smoothed.unsqueeze(1))
+
+                    dead = self._ema_cluster_size < 1.0
+                    num_dead = int(dead.sum().item())
+                    if num_dead > 0:
+                        rand_idx = torch.randint(0, z_flat.shape[0], (num_dead,), device=z_flat.device)
+                        self.embedding.weight.data[dead] = z_flat[rand_idx].detach()
+
+                commitment_loss = self._commitment_beta * F.mse_loss(z_flat, z_q_flat.detach())
+            else:
+                commitment_loss = (
+                    F.mse_loss(z_q_flat, z_flat.detach()) +
+                    self._commitment_beta * F.mse_loss(z_flat, z_q_flat.detach())
+                )
+            loss_dict = dict(commitment_loss=commitment_loss)
 
         reconstruction_loss = F.mse_loss(observations, reconstructions)
+        if self.lpips is not None:
+            perceptual_loss = torch.mean(self.lpips(observations, reconstructions).flatten())
+            loss_dict['perceptual_loss'] = perceptual_loss
+
+        loss_dict['reconstruction_loss'] = reconstruction_loss
 
         with torch.no_grad():
             info = {
-                'codebook_norms': torch.norm(self.embedding.weight, dim=1),
                 'token_counts': FreqDist(tokens.detach().flatten().cpu().numpy()),
-                # 'per_sample_loss': per_sample_loss
             }
 
-        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss, perceptual_loss=perceptual_loss), info
+        return LossWithIntermediateLosses(**loss_dict), info
 
     def encode(self, x: Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
         return self._auto_adjust_bsz_call(x, self._encode, _combine_encoder_outputs,
@@ -204,26 +300,32 @@ class ImageTokenizer(TokenizerBase):
             x = self.preprocess_input(x)
         shape = x.shape  # (..., C, H, W)
         x = x.view(-1, *shape[-3:])
-        z = self.encoder(x)
-        z = self.pre_quant_conv(z)
-        b, e, h, w = z.shape
-        z_flattened = rearrange(z, 'b e h w -> (b h w) e')
-        dist_to_embeddings = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(z_flattened, self.embedding.weight.t())
+        z = self.encoder(x)  # (B, embed_dim, h, w) — stored as-is for uniform interface
 
-        tokens = dist_to_embeddings.argmin(dim=-1)
-        z_q = rearrange(self.embedding(tokens), '(b h w) e -> b e h w', b=b, e=e, h=h, w=w).contiguous()
+        if self.fsq is not None:
+            b, _, h, w = z.shape
+            z_d = self.pre_quant_conv(z)  # (B, d, h, w)
+            codes, indices = self.fsq(rearrange(z_d, 'b d h w -> b h w d'))
+            z_q = self.post_quant_conv(rearrange(codes, 'b h w d -> b d h w').contiguous())  # (B, embed_dim, h, w)
+            tokens = indices.reshape(b, -1)
+        else:
+            b, e, h, w = z.shape
+            z_flat = rearrange(z, 'b e h w -> (b h w) e')
+            dist = (torch.sum(z_flat ** 2, dim=1, keepdim=True)
+                    + torch.sum(self.embedding.weight ** 2, dim=1)
+                    - 2 * z_flat @ self.embedding.weight.t())
+            tokens = dist.argmin(dim=-1)
+            z_q = rearrange(self.embedding(tokens), '(b h w) e -> b e h w', b=b, h=h, w=w).contiguous()
+            tokens = tokens.reshape(b, -1)
 
-        # Reshape to original
         z = z.reshape(*shape[:-3], *z.shape[1:])
         z_q = z_q.reshape(*shape[:-3], *z_q.shape[1:])
         tokens = tokens.reshape(*shape[:-3], -1)
-
         return TokenizerEncoderOutput(z, z_q, tokens)
 
     def decode(self, z_q: Tensor, should_postprocess: bool = False) -> Tensor:
-        shape = z_q.shape  # (..., E, h, w)
+        shape = z_q.shape  # (..., embed_dim, h, w)
         z_q = z_q.reshape(-1, *shape[-3:])
-        z_q = self.post_quant_conv(z_q)
         rec = self.decoder(z_q)
         rec = rec.reshape(*shape[:-3], *rec.shape[1:])
         if should_postprocess:
@@ -231,12 +333,18 @@ class ImageTokenizer(TokenizerBase):
         return rec
 
     @torch.no_grad()
-    def to_codes(self, tokens: Tensor, **kwargs):
+    def to_codes(self, tokens: Tensor, **kwargs) -> Tensor:
         hw = tokens.shape[-1]
         h = w = int(np.sqrt(hw))
-        emb = self.embedding(tokens)  # (B * hw, e)
-        z_q = rearrange(emb, '... (h w) e -> ... e h w', h=h, w=w).contiguous()
-        return z_q
+        if self.fsq is not None:
+            codes = self.fsq.indices_to_codes(tokens)           # (..., hw, d)
+            z_q = rearrange(codes, '... (h w) d -> ... d h w', h=h, w=w).contiguous()
+            shape = z_q.shape
+            z_q = self.post_quant_conv(z_q.reshape(-1, *shape[-3:]))  # d → embed_dim
+            return z_q.reshape(*shape[:-3], *z_q.shape[-3:])
+        else:
+            emb = self.embedding(tokens)                        # (..., hw, embed_dim)
+            return rearrange(emb, '... (h w) e -> ... e h w', h=h, w=w).contiguous()
 
     @torch.no_grad()
     def encode_decode(self, x: Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> Tensor:
