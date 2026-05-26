@@ -16,3 +16,4 @@ shared_embeddings: True
 obs_emb_dim: 256
 shared_prediction_token: False
 enable_curiosity: True
+curiosity_ensemble_size: 4

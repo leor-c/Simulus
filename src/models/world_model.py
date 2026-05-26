@@ -75,6 +75,7 @@ class TransformerConfig:
     blocks_per_chunk: int
     pos_enc: str = 'sinusoidal'
     pred_self_mask: str = 'causal'
+    pred_pass_mode: str = 'batched'
 
     @property
     def max_tokens(self):
@@ -224,7 +225,7 @@ class POPWorldModel(nn.Module):
             context_length: int = 2,
             compute_states_parallel: bool = True, shared_embeddings: bool = True,
             shared_prediction_token: bool = False, obs_emb_dim: Optional[int] = None,
-            enable_curiosity: bool = False, device=None, *args, **kwargs
+            enable_curiosity: bool = False, curiosity_ensemble_size: int = 4, device=None, *args, **kwargs
     ) -> None:
         tokens_per_obs = sum(tokens_per_obs_dict.values())
         super().__init__()
@@ -250,7 +251,7 @@ class POPWorldModel(nn.Module):
         )
 
         self.curiosity_head = nn.ModuleDict({k.name: EnsembleObsHead(
-            ensemble_size=4,
+            ensemble_size=curiosity_ensemble_size,
             embed_dim=backbone_cfg.embed_dim,
             vocab_size=get_vocab_head_dim(vocab_size),
             device=device
@@ -355,6 +356,7 @@ class POPWorldModel(nn.Module):
                 dropout=cfg.dropout,
                 pos_enc=cfg.pos_enc,
                 pred_self_mask=cfg.pred_self_mask,
+                pred_pass_mode=cfg.pred_pass_mode,
             ).to(self.device)
 
     @property
@@ -693,13 +695,10 @@ class POPWorldModel(nn.Module):
 
         latents = rearrange(outputs, 'b (t k1) e -> b t k1 e', k1=self.tokens_per_block)[:, :,
                   -self.tokens_per_action - 1]
-        # predicted_rewards = self.head_rewards(latents[torch.where(relevant_latents_mask)]).flatten()
-        ends_logits = self.head_ends(latents.flatten(0, 1))
 
-        mask_fill = torch.logical_not(relevant_labels_mask)
-        ignore_value = -100
         rewards_labels = rewards[torch.where(relevant_labels_mask)]
-        ends_labels = ends.masked_fill(mask_fill, ignore_value).flatten()
+        ends_labels = ends[torch.where(relevant_labels_mask)].long()
+        ends_logits = self.head_ends(latents[torch.where(relevant_latents_mask)])
 
         reward_latents = self.head_rewards.model(latents[torch.where(relevant_latents_mask)])
         loss_rewards = self.head_rewards.head.compute_loss(reward_latents, rewards_labels, reduction='none')

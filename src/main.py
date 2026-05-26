@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import gymnasium.spaces
 import hydra
@@ -20,7 +20,6 @@ import torch.nn as nn
 # torch.backends.cuda.enable_mem_efficient_sdp(False)
 # from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 # allow_ops_in_compiled_graph()
-torch.set_printoptions(profile='short', sci_mode=False)
 from tqdm import tqdm
 import wandb
 from loguru import logger
@@ -43,6 +42,27 @@ from utils import (
     TrainerInfoHandler, ControllerInfoHandler, ObsModality
 )
 from dataset import get_dataloader, CuriousReplayDistribution, EpisodeDirManager, NpCuriousReplayDistribution
+
+
+Env = Union[SingleProcessEnv, MultiProcessEnv]
+
+
+def create_env(cfg_env: DictConfig, num_envs: int) -> Env:
+    env_fn = partial(instantiate, config=cfg_env)
+    return MultiProcessEnv(env_fn, num_envs, should_wait_num_envs_ratio=1.0) if num_envs > 1 else SingleProcessEnv(env_fn)
+
+
+def create_run_envs(cfg: DictConfig) -> Tuple[Optional[Env], Optional[Env]]:
+    train_env = create_env(cfg.env.train, cfg.collection.train.num_envs) if cfg.training.should else None
+    test_env = create_env(cfg.env.test, cfg.collection.test.num_envs) if cfg.evaluation.should else None
+    return train_env, test_env
+
+
+def close_run_envs(train_env: Optional[Env], test_env: Optional[Env]) -> None:
+    if train_env is not None:
+        train_env.close()
+    if test_env is not None and test_env is not train_env:
+        test_env.close()
 
 
 class RunMetadata:
@@ -199,7 +219,12 @@ def build_agent(env, cfg, device):
 
 
 class Trainer:
-    def __init__(self, cfg: DictConfig) -> None:
+    def __init__(self, cfg: DictConfig, train_env: Optional[Env], test_env: Optional[Env]) -> None:
+        self.cfg = cfg
+        self.train_env = train_env
+        self.test_env = test_env
+        assert self.train_env is not None or self.test_env is not None
+
         wandb.init(
             config=OmegaConf.to_container(cfg, resolve=True),
             reinit=True,
@@ -207,12 +232,13 @@ class Trainer:
             **cfg.wandb
         )
 
-        torch.set_float32_matmul_precision(cfg.common.float32_matmul_precision)
+        # torch.autograd.set_detect_anomaly(True)
+        torch.set_printoptions(profile='short', sci_mode=False)
+        # torch.set_float32_matmul_precision(cfg.common.float32_matmul_precision)
 
         if cfg.common.seed is not None:
             set_seed(cfg.common.seed)
 
-        self.cfg = cfg
         self.start_epoch = 1
         self.device = torch.device(cfg.common.device)
 
@@ -241,22 +267,15 @@ class Trainer:
         episode_manager_test = EpisodeDirManager(self.episode_dir / 'test', max_num_episodes=cfg.collection.test.num_episodes_to_save, disable_saving=disable_saving)
         self.episode_manager_imagination = EpisodeDirManager(self.episode_dir / 'imagination', max_num_episodes=cfg.evaluation.actor_critic.num_episodes_to_save, disable_saving=disable_saving)
 
-        def create_env(cfg_env, num_envs):
-            env_fn = partial(instantiate, config=cfg_env)
-            return MultiProcessEnv(env_fn, num_envs, should_wait_num_envs_ratio=1.0) if num_envs > 1 else SingleProcessEnv(env_fn)
-
         if self.cfg.training.should:
-            self.train_env = create_env(cfg.env.train, cfg.collection.train.num_envs)
             self.train_dataset = instantiate(cfg.datasets.train)
             self.train_collector = Collector(self.train_env, self.train_dataset, episode_manager_train)
 
         if self.cfg.evaluation.should:
-            self.test_env = create_env(cfg.env.test, cfg.collection.test.num_envs)
             self.test_dataset = instantiate(cfg.datasets.test)
             self.test_collector = Collector(self.test_env, self.test_dataset, episode_manager_test)
 
-        assert self.cfg.training.should or self.cfg.evaluation.should
-        env = self.train_env if self.cfg.training.should else self.test_env
+        assert (self.cfg.training.should and self.train_env is not None) or (self.cfg.evaluation.should and self.test_env is not None)
         # logger.info(f"Obs space: {env.observation_space}")
         # logger.info(f"Action space size: {env.num_actions}")
 
@@ -485,11 +504,9 @@ class Trainer:
                 for loss_name, loss_value in losses.intermediate_losses.items():
                     intermediate_losses[f"{str(component)}/train/{loss_name}"] += loss_value / steps_per_epoch
 
-            if max_grad_norm is not None:
-                grad_norm = torch.nn.utils.clip_grad_norm_(component.parameters(), max_grad_norm)
-            else:
-                grad_norm = np.sqrt(
-                    sum([p.grad.norm(2).item() ** 2 for p in component.parameters() if p.grad is not None]))
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                component.parameters(), max_grad_norm if max_grad_norm is not None else float('inf')
+            )
             grad_norms_info(grad_norm)
 
 
@@ -672,17 +689,22 @@ class Trainer:
         return batch
 
     def finish(self) -> None:
+        close_run_envs(self.train_env, self.test_env)
         wandb.finish()
 
 
 @hydra.main(config_path="../config", config_name="base", version_base='1.1')
 def main(cfg: DictConfig):
     if hasattr(cfg.env, 'mp_spawn_method'):
-        multiprocessing.set_start_method('spawn')
-    trainer = Trainer(cfg)
+        multiprocessing.set_start_method(cfg.env.mp_spawn_method)
+    train_env, test_env = create_run_envs(cfg)
+    try:
+        trainer = Trainer(cfg, train_env=train_env, test_env=test_env)
+    except Exception:
+        close_run_envs(train_env, test_env)
+        raise
     trainer.run()
 
 
 if __name__ == '__main__':
     main()
-

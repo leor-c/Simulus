@@ -62,6 +62,7 @@ Previously processed tokens are never recomputed.
   ...
 """
 
+import contextlib
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, Literal, List
@@ -70,6 +71,13 @@ from typing import Optional, Tuple, Literal, List
 #   'causal' — lower-triangular (token j sees 0..j)
 #   'full'   — all-to-all (every token sees all n tokens in the copy)
 PredSelfMask = Literal["causal", "full"]
+
+# Prediction-pass implementation:
+#   'batched'   — concatenate all k copies into one sequence, single forward call
+#                 with the full POP mask.
+#   'per_copy'  — k independent forward calls, each copy attends only to the
+#                 context prefix it needs; no sparse cross-copy mask.
+PredPassMode = Literal["batched", "per_copy"]
 
 import torch
 import torch.nn as nn
@@ -428,13 +436,15 @@ class POPTransformer(nn.Module):
         dropout: float = 0.1,
         pos_enc: Literal["sinusoidal", "rotary"] = "sinusoidal",
         pred_self_mask: PredSelfMask = "causal",
+        pred_pass_mode: PredPassMode = "batched",
     ):
         super().__init__()
-        self.n_obs   = n_obs
-        self.n_act   = n_act
-        self.d_model = d_model
-        self.pos_enc = pos_enc
+        self.n_obs          = n_obs
+        self.n_act          = n_act
+        self.d_model        = d_model
+        self.pos_enc        = pos_enc
         self.pred_self_mask = pred_self_mask
+        self.pred_pass_mode = pred_pass_mode
 
         self.embed = nn.Embedding(vocab_size, d_model)
 
@@ -456,6 +466,12 @@ class POPTransformer(nn.Module):
 
         self.pred_tokens = nn.Parameter(torch.randn(n_obs, d_model) * 0.02)
         self.obs_head    = nn.Linear(d_model, vocab_size, bias=False)
+
+        self._pred_pass_fn = (
+            self._run_prediction_pass_per_copy
+            if pred_pass_mode == "per_copy"
+            else self._run_prediction_pass
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -568,6 +584,90 @@ class POPTransformer(nn.Module):
             )
         return x  # [B, k*n, D]
 
+    def _get_streams(self, k: int, device: torch.device) -> list:
+        """Lazily create and cache k CUDA streams for parallel copy execution."""
+        cached = getattr(self, "_cuda_streams", [])
+        if len(cached) < k:
+            self._cuda_streams = [torch.cuda.Stream(device=device) for _ in range(k)]
+        return self._cuda_streams[:k]
+
+    def _run_prediction_pass_per_copy(
+        self, k: int, context_cache: KVCache, device: torch.device
+    ) -> torch.Tensor:
+        """
+        Prediction pass: k independent forward calls, one per copy.
+
+        Copy i attends only to context[:i*(n+m)] (the exact prefix it needs)
+        instead of the full k*(n+m)-length context.  The large sparse POP mask
+        is replaced by k small dense masks of shape [n, i*(n+m)+n].
+
+        On CUDA, each copy is dispatched to its own stream so the k calls can
+        overlap on the GPU.  Streams first wait for the default stream (which
+        holds the completed context cache), then the default stream waits for
+        all copy streams before the final cat.
+
+        Produces numerically identical outputs to _run_prediction_pass.
+        Returns raw latents [B, k*n, D].
+        """
+        n, m = self.n_obs, self.n_act
+        B    = context_cache.layers[0].k.shape[0]
+
+        use_streams = device.type == "cuda" and k > 1
+        if use_streams:
+            streams = self._get_streams(k, device)
+            default_stream = torch.cuda.current_stream(device)
+            # Each copy stream must see the completed context cache before starting.
+            for s in streams:
+                s.wait_stream(default_stream)
+
+        outputs: List[Optional[torch.Tensor]] = [None] * k
+        for i in range(k):
+            stream_ctx = (
+                torch.cuda.stream(streams[i]) if use_streams
+                else contextlib.nullcontext()
+            )
+            with stream_ctx:
+                ctx_len  = i * (n + m)
+                pred_pos = torch.arange(ctx_len, ctx_len + n, device=device)
+
+                x_i = self.pred_tokens.unsqueeze(0).expand(B, -1, -1).clone()
+                if self.pos_enc == "sinusoidal":
+                    x_i = x_i + self.sinusoidal(pred_pos).unsqueeze(0)
+
+                # causal: context prefix (all True) + lower-triangular self-block
+                # full:   all keys visible — pass None to let SDPA use fast path
+                if self.pred_self_mask == "causal":
+                    mask_i: Optional[torch.Tensor] = torch.cat([
+                        torch.ones(n, ctx_len, dtype=torch.bool, device=device),
+                        torch.tril(torch.ones(n, n, dtype=torch.bool, device=device)),
+                    ], dim=1)
+                else:
+                    mask_i = None
+
+                if self.pos_enc == "rotary":
+                    # K covers positions 0..ctx_len-1 (context) then ctx_len..ctx_len+n-1 (pred)
+                    k_pos_i = torch.arange(ctx_len + n, device=device)
+                    q_freqs_i, k_freqs_i = self._rope_freqs(pred_pos, k_pos_i)
+                else:
+                    q_freqs_i = k_freqs_i = None
+
+                for layer, ctx_cache in zip(self.layers, context_cache.layers):
+                    sliced = LayerKVCache(
+                        k=ctx_cache.k[:, :, :ctx_len, :],
+                        v=ctx_cache.v[:, :, :ctx_len, :],
+                    )
+                    x_i, _ = layer.forward_with_kv_cache(
+                        x_i, cache=sliced, mask=mask_i,
+                        q_freqs=q_freqs_i, k_freqs=k_freqs_i,
+                    )
+                outputs[i] = x_i
+
+        if use_streams:
+            for s in streams:
+                default_stream.wait_stream(s)
+
+        return torch.cat(outputs, dim=1)  # [B, k*n, D]
+
     def _append_x_to_cache(
         self,
         cache: KVCache,
@@ -609,13 +709,12 @@ class POPTransformer(nn.Module):
         pred_x, pred_pos = self._pred_token_embeds(i, B, device)
 
         if self.pred_self_mask == "causal":
-            self_block = torch.tril(torch.ones(n, n, dtype=torch.bool, device=device))
-        else:
-            self_block = torch.ones(n, n, dtype=torch.bool, device=device)
-        mask = torch.cat([
-            torch.ones(n, T_ctx, dtype=torch.bool, device=device),
-            self_block,
-        ], dim=1)
+            mask: Optional[torch.Tensor] = torch.cat([
+                torch.ones(n, T_ctx, dtype=torch.bool, device=device),
+                torch.tril(torch.ones(n, n, dtype=torch.bool, device=device)),
+            ], dim=1)
+        else:  # full — all keys visible, no mask needed
+            mask = None
 
         all_k_positions = torch.cat([torch.arange(T_ctx, device=device), pred_pos])
         q_freqs, k_freqs = self._rope_freqs(pred_pos, all_k_positions) if self.pos_enc == "rotary" else (None, None)
@@ -704,7 +803,7 @@ class POPTransformer(nn.Module):
         """Returns logits [B, k, n_obs, vocab_size]."""
         n = self.n_obs
         B = context_cache.layers[0].k.shape[0]
-        x = self._run_prediction_pass(k, context_cache, device)
+        x = self._pred_pass_fn(k, context_cache, device)
         return self.obs_head(x.view(B, k, n, self.d_model))
 
     def forward(
@@ -851,7 +950,7 @@ class POPTransformer(nn.Module):
         instead of applying obs_head.
         """
         B = context_cache.layers[0].k.shape[0]
-        x = self._run_prediction_pass(k, context_cache, device)
+        x = self._pred_pass_fn(k, context_cache, device)
         return x.view(B, k, self.n_obs, self.d_model)
 
     def append_block_embs(self, cache: KVCache, block_emb: torch.Tensor) -> KVCache:

@@ -275,13 +275,13 @@ def retention_chunkwise_per_block_states(
     return retention, state
 
 
-@torch.compile()
+# @torch.compile()
 def _multiply_by_i(x: Tensor) -> Tensor:
     """Multiply a complex-valued tensor by the imaginary unit 'i'."""
     return torch.stack((-x[..., 1::2], x[..., ::2]), dim=-1).flatten(start_dim=-2)
 
 
-@torch.compile()
+# @torch.compile()
 def _theta_shift(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
     # TODO: Add docstring
     return (x * cos) + (_multiply_by_i(x) * sin)
@@ -358,7 +358,7 @@ def retention_chunkwise(
     return retention, state
 
 
-@torch.compile()
+# @torch.compile()
 def apply_relative_position(q, k, start_idx: Union[int, torch.Tensor], thetas: Tensor) -> Tuple[Tensor, Tensor]:
     indices = torch.arange(q.size(2), device=q.device, dtype=q.dtype)
 
@@ -386,7 +386,7 @@ def apply_relative_position(q, k, start_idx: Union[int, torch.Tensor], thetas: T
     return q, k
 
 
-@torch.compile()
+# @torch.compile()
 def apply_relative_position_pred_tokens(q, k, start_idx: Union[int, torch.Tensor], thetas: Tensor, tokens_per_block: int) -> Tuple[Tensor, Tensor]:
     assert q.dim() == 5 and k.dim() == 5
     indices = torch.arange(q.size(3), device=q.device, dtype=q.dtype).reshape(1, -1)

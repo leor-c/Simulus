@@ -1,9 +1,8 @@
 import re
 from abc import ABC, abstractmethod
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from typing import Optional, Union
 
-import cv2
 import random
 import shutil
 
@@ -15,7 +14,10 @@ import torch
 import torch.nn as nn
 import wandb
 from loguru import logger
-from nltk import FreqDist
+class FreqDist(Counter):
+    """Minimal Counter subclass replacing nltk.FreqDist. .B() returns unique-bin count."""
+    def B(self) -> int:
+        return len(self)
 from torch import Tensor
 import torch.nn.functional as F
 
@@ -31,9 +33,10 @@ def configure_optimizer(model, learning_rate, weight_decay):
         param_names_lst = pn.split(sep='.')
         layer_norm_pattern = '\.ln(\d+)|(_f)\.'
 
-        if param_names_lst[-1] == 'bias':
+        last = param_names_lst[-1]
+        if last == 'bias' or re.match(r'^b\d+$', last):
             no_decay.add(pn)
-        elif 'norm' in pn:
+        elif 'norm' in pn or last.startswith('ln_'):
             no_decay.add(pn)
         elif ('embedding' in param_names_lst or 'embed' in pn or 'pos_emb' in pn
               or 'pred_tokens' in param_names_lst or 'rotary_emb' in param_names_lst):
@@ -41,7 +44,9 @@ def configure_optimizer(model, learning_rate, weight_decay):
         elif re.search(layer_norm_pattern, pn) is not None:
             no_decay.add(pn)
         else:
-            assert param_names_lst[-1] in ['weight', 'freq'] or re.search("w_[a-z]$", param_names_lst[-1].lower()) is not None
+            assert (last in ['weight', 'freq']
+                    or re.search(r"w_[a-z]$", last.lower()) is not None
+                    or re.match(r'^w\d+$', last) is not None), f"unrecognized parameter name: {pn!r}"
             decay.add(pn)
 
     # validate that we considered every parameter

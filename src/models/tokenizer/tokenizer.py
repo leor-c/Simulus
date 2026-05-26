@@ -13,13 +13,12 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from nltk import FreqDist
 from torch import Tensor
 
 from dataset import Batch
 from .lpips import LPIPS
 from utils import (
-    LossWithIntermediateLosses, VectorQuantizer, ObsModality
+    LossWithIntermediateLosses, VectorQuantizer, ObsModality, FreqDist
 )
 from utils.math import base_n_to_base_10, base_10_to_base_n
 

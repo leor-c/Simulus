@@ -41,7 +41,7 @@ common:
   sequence_length: ${world_model.max_blocks}
   resume: False # set by resume.sh script only.
   float32_matmul_precision: 'highest'
-  num_dataloader_workers: 2
+  num_dataloader_workers: 0
 
 collection:
   train:
