@@ -284,7 +284,7 @@ class Trainer:
 
         uniform_fraction = cfg.training.world_model.replay_sampling_uniform_fraction
         if uniform_fraction < 1.0:
-            self.wm_crd = NpCuriousReplayDistribution(uniform_portion=uniform_fraction)
+            self.wm_crd = CuriousReplayDistribution(uniform_portion=uniform_fraction, device=self.device)
         else:
             self.wm_crd = None
 
@@ -472,7 +472,7 @@ class Trainer:
 
                 if replay_dist is not None:
                     assert 'per_sample_loss' in info
-                    replay_dist.update_losses(info['per_sample_loss'].detach().cpu().numpy())
+                    replay_dist.update_losses(info['per_sample_loss'].detach())
 
                 losses = losses / grad_acc_steps
                 loss_total_step = losses.loss_total

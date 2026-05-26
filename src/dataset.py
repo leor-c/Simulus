@@ -474,15 +474,10 @@ class CuriousReplayDistribution:
     """
 
     def __init__(
-            self, uniform_portion: float = 0.7, c=1e4, alpha=0.7, beta=0.7, eps=0.01, p_max=1e5, replacement: bool = False, device=None,
+            self, uniform_portion: float = 0.7, replacement: bool = False, device=None,
     ):
         self.uniform_portion = uniform_portion
         self.device = device
-        self.p_max = p_max
-        self.c = c
-        self.alpha = alpha
-        self.beta = beta
-        self.eps = eps
         self.replacement = replacement
         self.counts = None
         self.losses = None
@@ -492,24 +487,10 @@ class CuriousReplayDistribution:
 
     @property
     def distribution(self) -> torch.FloatTensor:
-        # total_counts = self.counts.sum() + 1
-        # p = self.c * (self.beta ** self.counts) + (torch.abs(self.losses) + self.eps) ** self.alpha
+        p = torch.softmax(self.losses, dim=0)
 
-        # min_valid_loss = self.losses[torch.where(self.counts > 0)].min() if self.counts.sum() > 0 else 0
-        # losses_shifted = torch.where(self.counts > 0, self.losses - min_valid_loss, torch.zeros_like(self.losses))
-        # max_loss = losses_shifted.max()
-        # if max_loss > 1e-6:
-        #     losses_shifted = losses_shifted / max_loss
-        # losses_shifted = torch.where(self.counts > 0, losses_shifted, torch.ones_like(self.losses))
-        # losses_coef = 3
-        # losses_bonus = torch.exp(losses_coef * losses_shifted)
-        # losses_bonus = losses_bonus / losses_bonus.max()
-
-        losses_bonus = torch.exp(self.losses)
-
-        assert not torch.isnan(losses_bonus).any(), f"got nan losses bonus: {losses_bonus}"
-        assert not torch.isinf(losses_bonus).any(), f"got inf losses bonus: {losses_bonus}"
-        p = losses_bonus
+        assert not torch.isnan(p).any(), f"got nan in distribution: {p}"
+        assert not torch.isinf(p).any(), f"got inf in distribution: {p}"
 
         return p
 
@@ -519,12 +500,15 @@ class CuriousReplayDistribution:
 
     def sample(self, batch_size: int) -> torch.LongTensor:
         assert self.num_samples > 0
-        replacement = False
         prioritized_bsz = math.ceil((1 - self.uniform_portion) * batch_size)
-        prioritized_sample = torch.multinomial(self.distribution, prioritized_bsz, replacement=replacement)
-        uniform_sample = torch.multinomial(torch.ones_like(self.distribution, device=self.device), batch_size - prioritized_bsz, replacement=replacement)
+        dist = self.distribution
+        prioritized_sample = torch.multinomial(dist, prioritized_bsz, replacement=False)
+        p = torch.ones_like(dist)
+        p[prioritized_sample] = 0
+        p = p / p.sum()
+        uniform_sample = torch.multinomial(p, batch_size - prioritized_bsz, replacement=False)
         sample = torch.cat([prioritized_sample, uniform_sample], dim=0)
-        sample = sample[torch.randperm(sample.size()[0], device=self.device)]  # shuffle so that curiosity ensemble members will get random splits
+        sample = sample[torch.randperm(sample.size(0), device=self.device)]  # shuffle so that curiosity ensemble members will get random splits
 
         self.last_sample = sample.clone()
         self.counts[sample] += 1
@@ -550,7 +534,6 @@ class CuriousReplayDistribution:
         assert not torch.isnan(batch_losses).any(), f"got at least one 'nan' loss value: {batch_losses}"
         assert not torch.isinf(batch_losses).any(), f"got at least one 'inf' loss value: {batch_losses}"
 
-        # device = self.losses[self.last_sample].device
         self.losses[self.last_sample] = batch_losses.to(self.device)
 
 
