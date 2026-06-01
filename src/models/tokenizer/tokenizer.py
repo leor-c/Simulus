@@ -110,31 +110,36 @@ class FSQ(nn.Module):
         self.vocab_size = int(levels_t.prod().item())
 
     def _bound(self, z: torch.Tensor) -> torch.Tensor:
-        half_l = (self._levels.float() - 1) * (1 + 1e-3) / 2
+        eps = 1e-3
+        half_l = (self._levels.float() - 1) * (1 - eps) / 2
         offset = torch.where(
             self._levels % 2 == 0,
             torch.full_like(self._levels, 0.5, dtype=torch.float),
             torch.zeros_like(self._levels, dtype=torch.float),
         )
-        shift = torch.atan(offset / half_l)
+        shift = torch.tan(offset / half_l)
         return (z + shift).tanh() * half_l - offset
 
     def quantize(self, z: torch.Tensor) -> torch.Tensor:
         """Quantize with straight-through estimator. z: (..., num_dims)"""
         z_b = self._bound(z)
-        return z_b + (z_b.round() - z_b).detach()
+        quantized = z_b + (z_b.round() - z_b).detach()
+
+        # renormalize to [-1, 1]:
+        half_width = self._levels // 2
+        return quantized / half_width
 
     def codes_to_indices(self, codes: torch.Tensor) -> torch.Tensor:
-        """Quantized codes (..., num_dims) → integer token indices (...)."""
+        """Normalized codes (..., num_dims) in [-1, 1] → integer token indices (...)."""
         half_l = self._levels // 2
-        int_codes = (codes + half_l.float()).round().long()
+        int_codes = (codes * half_l.float() + half_l.float()).round().long()
         return (int_codes * self._basis).sum(dim=-1)
 
     def indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
-        """Integer token indices (...) → quantized codes (..., num_dims)."""
+        """Integer token indices (...) → normalized codes (..., num_dims) in [-1, 1]."""
         half_l = self._levels // 2
         int_codes = (indices.unsqueeze(-1) // self._basis) % self._levels
-        return (int_codes.float() - half_l.float())
+        return (int_codes.float() - half_l.float()) / half_l.float()
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """z: (..., num_dims) → (quantized_codes (..., num_dims), indices (...))"""
@@ -278,6 +283,7 @@ class ImageTokenizer(TokenizerBase):
 
         reconstruction_loss = F.mse_loss(observations, reconstructions)
         if self.lpips is not None:
+            self.lpips.eval()
             perceptual_loss = torch.mean(self.lpips(observations, reconstructions).flatten())
             loss_dict['perceptual_loss'] = perceptual_loss
 
@@ -410,39 +416,40 @@ class HardCodedVectorTokenizer(TokenizerBase):
         return self.vector_quantizer.tokens_to_vector_pt(tokens)
 
 
-class VectorTokenizer(TokenizerBase):
+class FSQVectorTokenizer(TokenizerBase):
+    """MLP encoder → split → FSQ per chunk → MLP decoder for continuous vector obs (e.g. DMC).
 
-    def __init__(self, input_dim: int, embed_dim: int, vocab_size: int, device=None, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.input_dim = input_dim
-        self.embed_dim = embed_dim
-        self.vocab_size = vocab_size
-        self._tokens_per_obs = 32
+    The encoder projects to (num_tokens * num_fsq_dims), which is split into num_tokens chunks
+    and each chunk is independently quantized by FSQ, yielding num_tokens tokens per observation.
+    """
 
-        self.codebook = nn.Embedding(vocab_size * self.tokens_per_obs, embed_dim, device=device)
-        self.codebook.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+    def __init__(self, input_dim: int, levels: list[int], num_tokens: int = 8,
+                 hidden_dim: int = 256, num_layers: int = 2, device=None) -> None:
+        super().__init__()
+        self._num_tokens = num_tokens
+        d = len(levels)
 
-        self.encoder = nn.Sequential(
-            # nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, embed_dim * 2, device=device),
-            nn.ReLU(),
-            # nn.Linear(embedding_dim * 2, embedding_dim * 2),
-            # nn.ReLU(),
-            # nn.LayerNorm(embed_dim * 2),
-            nn.Linear(embed_dim * 2, vocab_size * self.tokens_per_obs, device=device),
-        )
-        self.decoder = nn.Sequential(
-            # nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim * 2, device=device),
-            nn.ReLU(),
-            # nn.Linear(embedding_dim * 2, embedding_dim * 2),
-            # nn.ReLU(),
-            # nn.LayerNorm(embed_dim * 2),
-            nn.Linear(embed_dim * 2, input_dim, device=device),
-        )
+        def mlp(in_dim, out_dim):
+            layers = []
+            cur = in_dim
+            for _ in range(num_layers):
+                layers += [
+                    nn.Linear(cur, hidden_dim, device=device),
+                    nn.SiLU(),
+                    nn.LayerNorm(hidden_dim, device=device)
+                ]
+                cur = hidden_dim
+            layers.append(nn.Linear(cur, out_dim, device=device))
+            return nn.Sequential(*layers)
+
+        self.encoder = mlp(input_dim, num_tokens * d)
+        self.decoder = mlp(num_tokens * d, input_dim)
+        self.fsq = FSQ(levels)
+        if device is not None:
+            self.fsq = self.fsq.to(device)
 
     def __repr__(self):
-        return 'VectorTokenizer'
+        return 'FSQVectorTokenizer'
 
     @property
     def modality(self) -> ObsModality:
@@ -454,301 +461,63 @@ class VectorTokenizer(TokenizerBase):
 
     @property
     def tokens_per_obs(self) -> int:
-        return self._tokens_per_obs
+        return self._num_tokens
+
+    @property
+    def vocab_size(self) -> int:
+        return self.fsq.vocab_size
 
     def forward(self, x: Tensor, should_preprocess: bool = False, should_postprocess: bool = False,
                 return_tokens: bool = False) -> Tuple[Tensor, ...]:
         outputs = self.encode(x, should_preprocess)
-        # decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
-        decoder_input = outputs.z_quantized
-        reconstructions = self.decode(decoder_input, should_postprocess)
+        reconstructions = self.decode(outputs.z_quantized, should_postprocess)
         if return_tokens:
             return outputs.z, outputs.z_quantized, reconstructions, outputs.tokens
         return outputs.z, outputs.z_quantized, reconstructions
 
-    def compute_loss(self, batch: Batch, **kwargs: Any) -> tuple[LossWithIntermediateLosses, dict]:
-        t = batch['observations'].shape[1]
-        b = batch['observations'].shape[0]
-        assert t == 1
-        observations = batch['observations']
-        z, z_quantized, reconstructions, tokens = self(observations, should_preprocess=False, should_postprocess=False,
-                                                       return_tokens=True)
+    def preprocess_input(self, x: Tensor) -> Tensor:
+        from utils.math import sym_log
+        return sym_log(x.float())
 
-        # Codebook loss. Notes:
-        # - beta position is different from taming and identical to original VQVAE paper
-        # - VQVAE uses 0.25 by default
-        beta = 1.0
-        # z = z.reshape(b, -1)
-        # z_quantized = z_quantized.reshape(b, -1)
-        # commitment_loss = F.mse_loss(z_quantized, z.detach()) + beta * F.mse_loss(z, z_quantized.detach())
+    def postprocess_output(self, z: Tensor) -> Tensor:
+        from utils.math import sym_exp
+        return sym_exp(z.float())
 
-        reconstruction_loss = F.mse_loss(observations, reconstructions)
-
+    def compute_loss(self, obs: Tensor, **kwargs: Any) -> tuple[LossWithIntermediateLosses, dict]:
+        # obs: (B, T, D) raw float32
+        assert obs.shape[1] == 1
+        z, z_quantized, reconstructions, tokens = self(
+            obs, should_preprocess=True, should_postprocess=False, return_tokens=True
+        )
+        reconstruction_loss = F.mse_loss(self.preprocess_input(obs), reconstructions)
         with torch.no_grad():
-            info = {
-                'codebook_norms': torch.norm(self.codebook.weight, dim=1),
-                'token_counts': FreqDist(tokens.detach().flatten().cpu().numpy()),
-                # 'per_sample_loss': per_sample_loss
-            }
-
+            info = {'token_counts': FreqDist(tokens.detach().flatten().cpu().numpy())}
         return LossWithIntermediateLosses(reconstruction_loss=reconstruction_loss), info
 
     def encode(self, x: Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
-        z = self.encoder(x.view(-1, x.shape[-1]))  # (b, k * vocab_size)
-        z = rearrange(z, 'b (k v) -> b k v', v=self.vocab_size, k=self.tokens_per_obs)
-        tokens = torch.distributions.Categorical(logits=z).sample()
-        one_hots = F.one_hot(tokens, self.vocab_size).flatten(-2)
-        p = torch.softmax(z, dim=-1).flatten(-2)
-        st_estimator = p + (one_hots - p).detach()
-
-        z_q = st_estimator @ self.codebook.weight
-
-        z_q = z_q.reshape(*x.shape[:-1], -1).contiguous()
-
-        return TokenizerEncoderOutput(z.reshape(*x.shape[:-1], -1), z_q, tokens)
-
-    def decode(self, z_q: Tensor, should_postprocess: bool = False) -> Tensor:
-        rec = self.decoder(z_q)
-        return rec
-
-    def to_codes(self, tokens, **kwargs):
-        return self.codebook(tokens)
-
-
-class VQVectorTokenizerOld(TokenizerBase):
-
-    def __init__(self, input_dim: int, embed_dim: int, vocab_size: int, device=None, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.input_dim = input_dim
-        self.embed_dim = embed_dim
-        self.vocab_size = vocab_size
-
-        self.features_per_token = 3
-        self._tokens_per_obs = int(np.ceil(input_dim / self.features_per_token))
-
-        self.codebook = nn.Embedding(vocab_size, self.features_per_token, device=device)
-        # self.codebook.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
-
-        self.encoder = nn.Sequential(
-            # nn.LayerNorm(input_dim),
-            nn.Linear(self.features_per_token, embed_dim, device=device),
-            # nn.ReLU(),
-            # nn.Linear(embedding_dim * 2, embedding_dim * 2),
-            # nn.ReLU(),
-            # nn.LayerNorm(embed_dim * 2),
-            # nn.Linear(embed_dim * 2, embed_dim),
-        )
-        # self.encoder = nn.Sequential(
-        #     nn.LayerNorm(input_dim),
-        #     nn.Linear(input_dim, 64),
-        #     nn.Conv1d(1, 64, kernel_size=3, stride=2, padding=0),
-        #     nn.ReLU(),
-        #     nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=0),
-        #     nn.ReLU(),
-        #     nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=0),
-        #     nn.ReLU(),
-        #     nn.LayerNorm(7),
-        #     nn.Conv1d(64, embed_dim, kernel_size=7, stride=2, padding=0),
-        #     # nn.Linear(embedding_dim * 2, embedding_dim * 2),
-        #     # nn.ReLU(),
-        #     # nn.LayerNorm(embed_dim * 2),
-        #     # nn.Linear(embed_dim * 2, embed_dim),
-        # )
-        self.decoder = nn.Sequential(
-            # nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim * 2),
-            nn.SiLU(),
-            nn.Linear(embed_dim * 2, embed_dim * 2),
-            nn.SiLU(),
-            # nn.LayerNorm(embed_dim * 2),
-            nn.Linear(embed_dim * 2, self.features_per_token, device=device),
-        )
-
-        self.code_map = nn.Sequential(
-            nn.Linear(self.features_per_token, embed_dim),
-            nn.LayerNorm(embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, self.features_per_token)
-        )
-
-    def __repr__(self):
-        return 'VectorTokenizer'
-
-    @property
-    def modality(self) -> ObsModality:
-        return ObsModality.vector
-
-    @property
-    def is_trainable(self) -> bool:
-        return True
-
-    @property
-    def tokens_per_obs(self) -> int:
-        return self._tokens_per_obs
-
-    def forward(self, x: Tensor, should_preprocess: bool = False, should_postprocess: bool = False,
-                return_tokens: bool = False) -> Tuple[Tensor, ...]:
-        outputs = self.encode(x, should_preprocess)
-        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
-        reconstructions = self.decode(decoder_input, should_postprocess)
-        if return_tokens:
-            return outputs.z, outputs.z_quantized, reconstructions, outputs.tokens
-        return outputs.z, outputs.z_quantized, reconstructions
-
-    def compute_loss(self, batch: Batch, **kwargs: Any) -> tuple[LossWithIntermediateLosses, dict]:
-        t = batch['observations'].shape[1]
-        b = batch['observations'].shape[0]
-        assert t == 1
-        observations = batch['observations']
-        z, z_quantized, reconstructions, tokens = self(observations, should_preprocess=False, should_postprocess=False,
-                                                       return_tokens=True)
-
-        # loguru.logger.debug(f"diff: {observations[0] - reconstructions[0]}")
-
-        # Codebook loss. Notes:
-        # - beta position is different from taming and identical to original VQVAE paper
-        # - VQVAE uses 0.25 by default
-        beta = 1.0
-        # z = z.reshape(b, -1)
-        # z_quantized = z_quantized.reshape(b, -1)
-        commitment_loss = F.mse_loss(z_quantized, z.detach()) + beta * F.mse_loss(z, z_quantized.detach())
-
-        reconstruction_loss = F.mse_loss(observations, reconstructions)
-
-        with torch.no_grad():
-            info = {
-                'codebook_norms': torch.norm(self.codebook.weight, dim=1),
-                'token_counts': FreqDist(tokens.detach().flatten().cpu().numpy()),
-                # 'per_sample_loss': per_sample_loss
-            }
-
-        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss), info
-
-    def encode(self, x: Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
-        # x = sym_log(x)
-        k = self.tokens_per_obs
-        d = self.features_per_token
-        e = self.embed_dim
-        residue = x.shape[-1] % self.features_per_token
-        if residue > 0:
-            # x = torch.cat([x[..., :-residue], x[..., -self.features_per_token:]], dim=-1)
-            x = F.pad(x, (0, self.features_per_token - residue), mode='constant', value=0)
-        x_flat = rearrange(x.view(-1, x.shape[-1]), 'b (k d) -> b k d', d=d, k=k)
-        z = self.encoder(x_flat)
-        latent_codes = self.code_map(self.codebook.weight)  # (v d)
-        dist_to_embeddings = (
-                torch.sum(x_flat ** 2, dim=-1, keepdim=True) +
-                torch.sum(latent_codes ** 2, dim=-1).view(1, 1, -1) -
-                2 * torch.matmul(x_flat, latent_codes.t())
-        )
-
-        tokens = dist_to_embeddings.argmin(dim=-1).long().reshape(*x.shape[:-1], -1)
-        z_q = self.encoder(self.code_map(self.codebook(tokens))).reshape(*x.shape[:-1], k, e).contiguous()
-
-        return TokenizerEncoderOutput(z.reshape(*x.shape[:-1], k, e), z_q, tokens)
+        shape = x.shape  # (..., input_dim)
+        d = self.fsq.num_dims
+        if should_preprocess:
+            x = self.preprocess_input(x)
+        z = self.encoder(x.reshape(-1, shape[-1]))                        # (B, num_tokens * d)
+        z_split = z.reshape(-1, self._num_tokens, d)                      # (B, num_tokens, d)
+        codes, indices = self.fsq(z_split)                                # (B, num_tokens, d), (B, num_tokens)
+        z_q = codes.reshape(*shape[:-1], self._num_tokens, d)             # (..., num_tokens, d)
+        z = z.reshape(*shape[:-1], self._num_tokens, d)
+        tokens = indices.reshape(*shape[:-1], self._num_tokens)           # (..., num_tokens)
+        return TokenizerEncoderOutput(z, z_q, tokens)
 
     def decode(self, z_q: Tensor, should_postprocess: bool = False) -> Tensor:
-        # z_q = rearrange(z_q, '... (k d) -> ... k d', k=self.tokens_per_obs, d=self.features_per_token)
-        rec = self.decoder(z_q).flatten(-2)
-        return rec
+        shape = z_q.shape  # (..., num_tokens, d)
+        flat = z_q.reshape(-1, self._num_tokens * self.fsq.num_dims)     # (B, num_tokens * d)
+        x_hat = self.decoder(flat).reshape(*shape[:-2], -1)               # (..., input_dim)
+        if should_postprocess:
+            x_hat = self.postprocess_output(x_hat)
+        return x_hat
 
-    def to_codes(self, tokens, **kwargs):
-        return self.encoder(self.code_map(self.codebook(tokens)))
-
-
-class VQVectorTokenizer(TokenizerBase):
-
-    def __init__(self, input_dim: int, bits_per_code: int = 12, hidden_dim: int = 256, device=None, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.vocab_size = 2 ** bits_per_code
-
-        self.bits_per_code = bits_per_code
-        self._tokens_per_obs = 1
-
-        self.encoder = nn.Sequential(
-            # nn.LayerNorm(input_dim, device=device),
-            nn.Linear(input_dim, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.LayerNorm(hidden_dim, device=device),
-            nn.Linear(hidden_dim, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.LayerNorm(hidden_dim, device=device),
-            nn.Linear(hidden_dim, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.LayerNorm(hidden_dim, device=device),
-            nn.Linear(hidden_dim, bits_per_code, device=device),
-            nn.Sigmoid(),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(bits_per_code, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.LayerNorm(hidden_dim, device=device),
-            nn.Linear(hidden_dim, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.LayerNorm(hidden_dim, device=device),
-            nn.Linear(hidden_dim, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.LayerNorm(hidden_dim, device=device),
-            nn.Linear(hidden_dim, input_dim, device=device),
-        )
-
-    def __repr__(self):
-        return 'VectorTokenizer'
-
-    @property
-    def modality(self) -> ObsModality:
-        return ObsModality.vector
-
-    @property
-    def is_trainable(self) -> bool:
-        return True
-
-    @property
-    def tokens_per_obs(self) -> int:
-        return self._tokens_per_obs
-
-    def forward(self, x: Tensor, should_preprocess: bool = False, should_postprocess: bool = False,
-                return_tokens: bool = False) -> Tuple[Tensor, ...]:
-        outputs = self.encode(x, should_preprocess)
-        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
-        reconstructions = self.decode(decoder_input, should_postprocess)
-        if return_tokens:
-            return outputs.z, outputs.z_quantized, reconstructions, outputs.tokens
-        return outputs.z, outputs.z_quantized, reconstructions
-
-    def compute_loss(self, batch: Batch, **kwargs: Any) -> tuple[LossWithIntermediateLosses, dict]:
-        observations = batch['observations'][ObsModality.vector]
-        assert observations.shape[1] == 1
-        z, z_quantized, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
-
-        commitment_loss = F.mse_loss(z, z_quantized.detach())
-
-        reconstruction_loss = F.mse_loss(observations, reconstructions)
-        logger.debug(f"{observations[0]}; {reconstructions[0]}")
-
-        info = {}
-
-        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss), info
-
-    def encode(self, x: Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
-        k = self.bits_per_code
-        z = self.encoder(x)
-        z_q = torch.where(z > 0, torch.ones_like(z), torch.zeros_like(z))
-        tokens = base_n_to_base_10(z_q, 2, num_digits=k)
-
-        return TokenizerEncoderOutput(z, z, tokens)
-
-    def decode(self, z_q: Tensor, should_postprocess: bool = False) -> Tensor:
-        rec = self.decoder(z_q)
-        return rec
-
-    def to_codes(self, tokens, **kwargs):
-        return base_10_to_base_n(tokens, 2, num_digits=self.bits_per_code)
+    def to_codes(self, tokens: Tensor, **kwargs) -> Tensor:
+        # tokens: (..., num_tokens) → codes: (..., num_tokens, d)
+        return self.fsq.indices_to_codes(tokens)
 
 
 class DummyTokenizer(TokenizerBase):

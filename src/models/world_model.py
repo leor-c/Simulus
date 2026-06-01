@@ -18,8 +18,6 @@ from .pop_retnet import POPRetNetDecoderLayer, POPRetNetDecoder
 from .pop_attention import (
     POPTransformer,
     KVCache as TransformerKVCache,
-    build_pop_mask,
-    build_prediction_positions,
 )
 from .tokenizer import HardCodedVectorTokenizer, MultiModalTokenizer
 from utils import (
@@ -82,10 +80,6 @@ class TransformerConfig:
         return self.embed_dim  # unused placeholder; kept for interface parity with RetNetConfig
 
 
-from torch.func import stack_module_state, functional_call
-from torch import vmap
-
-
 def get_vocab_head_dim(obs_vocab_size: Union[int, np.ndarray]):
     # determine the output size:
     if isinstance(obs_vocab_size, np.ndarray):
@@ -132,20 +126,7 @@ class EnsembleObsHead(nn.Module):
         self.ensemble_size = ensemble_size
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
-
-        self.ensemble = nn.ModuleList([
-            self._build_model(device=device) for _ in range(ensemble_size)
-        ])
-
-        self.meta_model = None
-        self.ens_params = None
-        self.ens_buffers = None
-
-        self.init_meta_model()
-
-    def init_meta_model(self):
-        self.meta_model = self._build_model().to('meta')
-        self.ens_params, self.ens_buffers = stack_module_state(self.ensemble)
+        self.ensemble = nn.ModuleList([self._build_model(device=device) for _ in range(ensemble_size)])
 
     def _build_model(self, device=None):
         return nn.Sequential(
@@ -155,42 +136,22 @@ class EnsembleObsHead(nn.Module):
             nn.Linear(self.embed_dim * 2, self.vocab_size, device=device)
         )
 
-    def _ensemble_forward(self, params, buffers, x):
-        return functional_call(self.meta_model, (params, buffers), (x,))
-
     def forward(self, x):
-        x = rearrange(x, '(m bi) ... -> m bi ...', m=self.ensemble_size)
+        # x: (E*B, ...) — interleaved ensemble/batch
+        x = rearrange(x, '(m b) ... -> m b ...', m=self.ensemble_size)
         x = torch.stack([m_i(x_i) for m_i, x_i in zip(self.ensemble, x)])
-        # x = vmap(self._ensemble_forward)(self.ens_params, self.ens_buffers, x)
-        x = rearrange(x, 'm bi ... -> (m bi) ...')
-        return x
+        return rearrange(x, 'm b ... -> (m b) ...')
 
     def forward_all(self, x):
-        # x = x.unsqueeze(0).expand(self.ensemble_size, *x.shape)
-        # x = vmap(self._ensemble_forward)(self.ens_params, self.ens_buffers, x)
-        # return x
+        # x: (B, ...) — apply all ensemble members to all inputs, returns (E, B, ...)
         return torch.stack([m(x) for m in self.ensemble])
 
     def estimate_uncertainty(self, x):
-        # TODO: implement a version without the for loop.
-        # Use the "Jensen–Shannon divergence" as a variance measure between the discrete distributions:
-        ensemble_outs = torch.stack([model_i(x) for model_i in self.ensemble])
+        ensemble_outs = self.forward_all(x)  # (E, B, ..., V)
         ensemble_dist = torch.distributions.Categorical(logits=ensemble_outs)
         ensemble_mean_dist = torch.distributions.Categorical(probs=torch.softmax(ensemble_outs, dim=-1).mean(0))
         jsd = ensemble_mean_dist.entropy() - ensemble_dist.entropy().mean(dim=0)
-
-        probs = ensemble_mean_dist.probs
-
-        # b = ensemble_outs.shape[1]
-        # probs = torch.split(ensemble_dist.probs, b // self.ensemble_size, dim=1)
-        # probs = torch.cat([p_i[i] for i, p_i in enumerate(probs)], dim=0)
-
-        # ensemble_outs = torch.softmax(torch.stack([model_i(x) for model_i in self.ensemble]), dim=-1)
-        # mean = ensemble_outs.mean(dim=0, keepdim=True)
-        # var = torch.sum((ensemble_outs - mean) ** 2, dim=(0, -1)) / (self.ensemble_size - 1)
-        # return var, mean.squeeze(0)
-
-        return jsd, probs
+        return jsd, ensemble_mean_dist.probs
 
 
 class RewardHead(nn.Module):
@@ -303,7 +264,7 @@ class POPWorldModel(nn.Module):
 
     def _build_obs_head(self, obs_vocab_size: int) -> nn.Module:
         embed_dim = self.config.embed_dim
-        device = self.device
+        device = self._device
         return nn.Sequential(
             # nn.ReLU(),
             nn.Linear(embed_dim, embed_dim * 2, device=device),
@@ -564,10 +525,11 @@ class POPWorldModel(nn.Module):
         """
         assert isinstance(self._model, POPTransformer)
         block_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')
-        if cache is None:
-            _, cache = self._model.encode_embs_to_kv_cache(block_emb)
-        else:
-            cache = self._model.append_block_embs(cache, block_emb)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if cache is None:
+                _, cache = self._model.encode_embs_to_kv_cache(block_emb)
+            else:
+                cache = self._model.append_block_embs(cache, block_emb)
         return cache
 
     @torch.no_grad()
@@ -586,9 +548,8 @@ class POPWorldModel(nn.Module):
         assert self.backbone == 'transformer' and isinstance(self._model, POPTransformer)
         n = self.tokens_per_obs
         block_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')   # [B, n+m, E]
-        return self._model.append_block_embs_and_predict_latents(
-            cache, block_emb[:, :n], block_emb[:, n:],
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            return self._model.append_block_embs_and_predict_latents(cache, block_emb)
 
     def compute_next_obs_pred_latents(self, recurrent_state: Union[RecurrentState, TransformerKVCache, None]):
         if self.backbone == 'transformer':
@@ -629,7 +590,7 @@ class POPWorldModel(nn.Module):
             batch['ends']
         )
 
-        info = {'per_sample_loss': obs_per_sample_loss + reward_per_sample_loss}
+        info = {'per_sample_loss': obs_per_sample_loss.cpu() + reward_per_sample_loss.cpu()}
         losses = {
             'loss_obs': loss_obs,
             'loss_rewards': loss_rewards,
@@ -680,8 +641,9 @@ class POPWorldModel(nn.Module):
             curiosity_loss = None
 
         per_sample_counts = pred_mask.sum(dim=1).tolist()
-        per_sample_loss = torch.split(loss_obs.detach(), per_sample_counts, dim=0)
-        per_sample_loss = torch.stack([l_i.mean() for l_i in per_sample_loss]).flatten()
+        with torch.no_grad():
+            per_sample_loss = torch.split(loss_obs.detach(), per_sample_counts, dim=0)
+            per_sample_loss = torch.stack([l_i.mean() for l_i in per_sample_loss]).flatten()
 
         return loss_obs.mean(), per_sample_loss, curiosity_loss
 
@@ -705,8 +667,9 @@ class POPWorldModel(nn.Module):
         loss_ends = F.cross_entropy(ends_logits, ends_labels)
 
         per_sample_losses_count = relevant_latents_mask.flatten(1).sum(dim=1).tolist()
-        per_sample_losses = torch.split(loss_rewards.detach(), per_sample_losses_count)
-        per_sample_losses = torch.stack([l_i.mean() for l_i in per_sample_losses]).flatten()
+        with torch.no_grad():
+            per_sample_losses = torch.split(loss_rewards.detach(), per_sample_losses_count)
+            per_sample_losses = torch.stack([l_i.mean() for l_i in per_sample_losses]).flatten()
 
         return loss_rewards.mean(), loss_ends, per_sample_losses
 
@@ -811,8 +774,4 @@ class ContinuousPOPWorldModel(POPWorldModel):
         else:
             action_tokens = self.action_tokenizer.encode(actions).tokens  # b t d
             return self.action_embeddings(action_tokens)  # b t d e
-
-
-
-
 

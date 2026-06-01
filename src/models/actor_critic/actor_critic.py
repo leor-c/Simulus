@@ -292,7 +292,8 @@ class ActorCriticLS(nn.Module):
                 lambda_=lambda_,
             )[:, :-1]
         self.return_scaler.update(lambda_returns)
-        returns_scale = torch.maximum(torch.ones_like(self.return_scaler.scale), self.return_scaler.scale * 0.5)
+        scaler_scale = self.return_scaler.scale.to(device=lambda_returns.device, dtype=lambda_returns.dtype)
+        returns_scale = torch.maximum(torch.ones_like(scaler_scale), scaler_scale * 0.5)
 
         values = values_means[:, :-1]
 
@@ -311,11 +312,11 @@ class ActorCriticLS(nn.Module):
 
 
         info = {
-            'imagined_rewards': outputs.rewards.detach().clone(),
-            'returns': lambda_returns.detach().clone(),
-            'values': values.detach().clone(),
-            'normalized_advantage': advantage.detach().clone(),
-            'log_probs': log_probs.detach().clone(),
+            'imagined_rewards': outputs.rewards.detach().clone().cpu(),
+            'returns': lambda_returns.detach().clone().cpu(),
+            'values': values.detach().clone().cpu(),
+            'normalized_advantage': advantage.detach().clone().cpu(),
+            'log_probs': log_probs.detach().clone().cpu(),
             'returns_scale': returns_scale.item()
         }
 
@@ -411,8 +412,8 @@ class ActorCriticLS(nn.Module):
 
             actor_outs, critic_outs = self(inputs=obs_codes)
             action = actor_outs.get_actions_distributions().sample()
-            assert self.include_action_inputs
-            q = self.process_action(action.squeeze(1))
+            if self.include_action_inputs:
+                self.process_action(action.squeeze(1))
             should_predict_next_obs = k < effective_horizon - 1
             obs_tokens, reward, done, _ = wm_env.step(action, should_predict_next_obs=should_predict_next_obs, return_tokens=True)
             obs_codes = self._to_codes(obs_tokens, world_model, tokenizer) if should_predict_next_obs else None
@@ -466,7 +467,7 @@ class ActorCriticLS(nn.Module):
             actor_outs, critic_outs = self(inputs=obs_codes)
             action = actor_outs.get_actions_distributions().sample()
             if self.include_action_inputs:
-                q = self.process_action(action.squeeze(1))
+                self.process_action(action.squeeze(1))
             obs, reward, terminated, truncated, _ = env.step(action[0].detach().cpu().numpy())
             obs = torch.Tensor([obs]).float().to(action.device)
             if terminated:

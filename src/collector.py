@@ -18,7 +18,8 @@ from dataset import EpisodesDataset, EpisodeDirManager
 from envs import SingleProcessEnv, MultiProcessEnv
 from episode import Episode
 from utils import (
-    RandomHeuristic, DiscreteRandomHeuristic, ContinuousRandomHeuristic, ObsModality
+    RandomHeuristic, DiscreteRandomHeuristic, ContinuousRandomHeuristic, ObsModality,
+    make_progress_updater, TrainingDisplay,
 )
 from utils.preprocessing import get_obs_processor
 
@@ -52,7 +53,7 @@ class Collector:
         return processed_obs
 
     @torch.no_grad()
-    def collect(self, agent: Agent, epoch: int, epsilon: float, should_sample: bool, temperature: float, burn_in: int, *, num_steps: Optional[int] = None, num_episodes: Optional[int] = None):
+    def collect(self, agent: Agent, epoch: int, epsilon: float, should_sample: bool, temperature: float, burn_in: int, *, num_steps: Optional[int] = None, num_episodes: Optional[int] = None, display: Optional[TrainingDisplay] = None,):
         # assert self.env.num_actions == agent.world_model.act_vocab_size
         assert 0 <= epsilon <= 1
 
@@ -92,7 +93,10 @@ class Collector:
             mask_padding=mask_padding,
             actions=burning_actions
         )
-        pbar = tqdm(total=num_steps if num_steps is not None else num_episodes, desc=f'Experience collection ({self.dataset.name})', file=sys.stdout)
+        # pbar = tqdm(total=num_steps if num_steps is not None else num_episodes, desc=f'Experience collection ({self.dataset.name})', file=sys.stdout)
+        dataset_name = getattr(self.dataset, 'name', 'dataset')
+        total = num_steps if num_steps is not None else num_episodes
+        _update_progress = make_progress_updater(f'Collecting {dataset_name}', total=total, display=display)
 
         while not should_stop(steps, episodes):
 
@@ -119,7 +123,8 @@ class Collector:
 
             new_steps = len(self.env.mask_new_dones)
             steps += new_steps
-            pbar.update(new_steps if num_steps is not None else 0)
+            # pbar.update(new_steps if num_steps is not None else 0)
+            _update_progress(new_steps if num_steps is not None else 0)
 
             # Warning: with EpisodicLifeEnv + MultiProcessEnv, reset is ignored if not a real done.
             # Thus, segments of experience following a life loss and preceding a general done are discarded.
@@ -135,7 +140,7 @@ class Collector:
 
                 new_episodes = self.env.num_envs
                 episodes += new_episodes
-                pbar.update(new_episodes if num_episodes is not None else 0)
+                # pbar.update(new_episodes if num_episodes is not None else 0)
 
                 infos = defaultdict(list)
                 for episode_id in self.episode_ids:

@@ -123,7 +123,7 @@ class BufferScaler:
         return self.estimate_high - self.estimate_low
 
     def update(self, values: Tensor):
-        values = values.detach().clone().unsqueeze(0)
+        values = values.detach().float().cpu().clone().unsqueeze(0)
         if self._buffer is None:
             self._buffer = values
         else:

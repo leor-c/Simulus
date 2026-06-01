@@ -42,6 +42,7 @@ common:
   resume: False # set by resume.sh script only.
   float32_matmul_precision: 'highest'
   num_dataloader_workers: 0
+  display_mode: "persistent"  # "per_epoch" | "persistent" | "disabled"
 
 collection:
   train:

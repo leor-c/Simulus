@@ -321,8 +321,10 @@ class QuantizedContinuousDistribution(Categorical):
         centers = (quantized_values[:-1] + quantized_values[1:]) / 2
         indices = torch.searchsorted(centers, value)  # (b, t, a)
         # select the appropriate index along the last axis:
-        p = self.probs.view(-1, quantized_values.numel())[torch.arange(indices.numel()), indices.view(-1)]
-        p = p.view(indices.size())
+        flat_indices = indices.reshape(-1)
+        rows = torch.arange(flat_indices.numel(), device=value.device)
+        p = self.probs.reshape(-1, quantized_values.numel())[rows, flat_indices]
+        p = p.reshape(indices.size())
         log_p = torch.log(p)
         return log_p
 

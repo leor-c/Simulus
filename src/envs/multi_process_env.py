@@ -59,11 +59,14 @@ class MultiProcessEnv(DoneTrackerEnv):
     def __init__(self, env_fn: Callable, num_envs: int, should_wait_num_envs_ratio: float) -> None:
         super().__init__(num_envs)
         env = env_fn()
-        self.modalities = env.modalities
-        self.action_space = env.action_space
-        self.observation_space = env.observation_space
-        self.num_actions = self.action_space.n if isinstance(self.action_space, gymnasium.spaces.Discrete) else None
-        self.obs_stack_fn = stack_dict_obs if isinstance(env.observation_space, gymnasium.spaces.Dict) else stack_obs
+        try:
+            self.modalities = env.modalities
+            self.action_space = env.action_space
+            self.observation_space = env.observation_space
+            self.num_actions = self.action_space.n if isinstance(self.action_space, gymnasium.spaces.Discrete) else None
+            self.obs_stack_fn = stack_dict_obs if isinstance(env.observation_space, gymnasium.spaces.Dict) else stack_obs
+        finally:
+            env.close()
         self.should_wait_num_envs_ratio = should_wait_num_envs_ratio
         self.processes, self.parent_conns = [], []
         for child_id in range(num_envs):

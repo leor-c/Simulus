@@ -3,8 +3,7 @@ POP (Parallel Observation Prediction) mechanism with standard Attention.
 
 Positional encoding modes (selectable at construction time):
   pos_enc='sinusoidal'  — classic additive sinusoidal embeddings (default)
-  pos_enc='rotary'      — RoPE via rotary-embedding-torch (lucidrains)
-                          pip install rotary-embedding-torch
+  pos_enc='rotary'      — RoPE via src/utils/rope.py (NVIDIA TransformerEngine)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SEQUENCE LAYOUT
@@ -249,25 +248,25 @@ class MultiHeadAttention(nn.Module):
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         """[B, T, D] → [B, H, T, Dh]"""
         B, T, _ = x.shape
-        return x.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        return x.view(B, T, self.n_heads, self.d_head).transpose(1, 2).contiguous()
 
     def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
         """[B, H, T, Dh] → [B, T, D]"""
         B, H, T, Dh = x.shape
-        return x.transpose(1, 2).reshape(B, T, H * Dh)
+        return x.transpose(1, 2).reshape(B, T, H * Dh).contiguous()
 
     def _apply_rope(
         self,
         q: torch.Tensor,       # [B, H, Tq, Dh]
         k: torch.Tensor,       # [B, H, Tk, Dh]
-        q_freqs: torch.Tensor, # pre-computed RoPE freqs for Q positions
-        k_freqs: torch.Tensor, # pre-computed RoPE freqs for K positions
+        q_freqs: torch.Tensor, # pre-computed RoPE freqs for Q positions [Tq, 1, 1, d]
+        k_freqs: torch.Tensor, # pre-computed RoPE freqs for K positions [Tk, 1, 1, d]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        from rotary_embedding_torch import apply_rotary_emb
-        return (
-            apply_rotary_emb(q_freqs, q, seq_dim=-2),
-            apply_rotary_emb(k_freqs, k, seq_dim=-2),
-        )
+        from utils.rope import apply_rotary_pos_emb
+        # apply_rotary_pos_emb expects bshd=[B, S, H, Dh]; our tensors are [B, H, T, Dh]
+        q = apply_rotary_pos_emb(q.transpose(1, 2).contiguous(), q_freqs, tensor_format="bshd").transpose(1, 2).contiguous()
+        k = apply_rotary_pos_emb(k.transpose(1, 2).contiguous(), k_freqs, tensor_format="bshd").transpose(1, 2).contiguous()
+        return q, k
 
     def _project(
         self,
@@ -288,18 +287,21 @@ class MultiHeadAttention(nn.Module):
         K: torch.Tensor,                          # [B, H, Tk, Dh]
         V: torch.Tensor,                          # [B, H, Tk, Dh]
         mask: Optional[torch.Tensor],             # [Tq, Tk] or [B, H, Tq, Tk] bool
+        is_causal: bool = False,
     ) -> torch.Tensor:
         """
         Fused attention via SDPA.  mask: True = attend, False = block.
-        SDPA expects attn_mask in additive form OR bool with True=keep —
-        PyTorch >= 2.0 accepts bool directly with the correct semantics.
+        Pass mask=None and is_causal=True to use Flash/cuDNN causal kernel
+        instead of a boolean mask (faster on all backends).
         dropout_p is only applied during training.
         """
         dropout_p = self.dropout if self.training else 0.0
+        Q, K, V = Q.contiguous(), K.contiguous(), V.contiguous()
         out = F.scaled_dot_product_attention(
             Q, K, V,
             attn_mask=mask,
             dropout_p=dropout_p,
+            is_causal=is_causal,
         )
         return self._merge_heads(out)  # [B, Tq, D]
 
@@ -315,11 +317,12 @@ class MultiHeadAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,       # [Tq, Tk] bool, True=attend
         q_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for Q
         k_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for K
+        is_causal: bool = False,
     ) -> torch.Tensor:
         Q, K, V = self._project(q_in, k_in, v_in)
         if q_freqs is not None:
             Q, K = self._apply_rope(Q, K, q_freqs, k_freqs)
-        return self.out_proj(self._attend(Q, K, V, mask))
+        return self.out_proj(self._attend(Q, K, V, mask, is_causal=is_causal))
 
     # ------------------------------------------------------------------
     # Inference forward: projects only new tokens, appends to KV cache.
@@ -334,6 +337,7 @@ class MultiHeadAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,       # [Tq, T_total] bool
         q_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for Q
         k_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for K (T_total)
+        is_causal: bool = False,
     ) -> Tuple[torch.Tensor, LayerKVCache]:
         # Project only the new tokens
         Q     = self._split_heads(self.q_proj(q_in))
@@ -354,7 +358,7 @@ class MultiHeadAttention(nn.Module):
         if q_freqs is not None:
             Q, K = self._apply_rope(Q, K, q_freqs, k_freqs)
 
-        return self.out_proj(self._attend(Q, K, V, mask)), updated_cache
+        return self.out_proj(self._attend(Q, K, V, mask, is_causal=is_causal)), updated_cache
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -379,10 +383,11 @@ class TransformerLayer(nn.Module):
         mask: Optional[torch.Tensor] = None,
         q_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for Q
         k_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for K
+        is_causal: bool = False,
     ) -> torch.Tensor:
         kv = kv if kv is not None else x
         x = self.norm1(x + self.drop(
-            self.self_attn(x, kv, kv, mask, q_freqs, k_freqs)
+            self.self_attn(x, kv, kv, mask, q_freqs, k_freqs, is_causal=is_causal)
         ))
         return self.norm2(x + self.drop(self.ff(x)))
 
@@ -393,10 +398,11 @@ class TransformerLayer(nn.Module):
         mask: Optional[torch.Tensor] = None,
         q_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for Q
         k_freqs: Optional[torch.Tensor] = None,    # pre-computed RoPE freqs for K
+        is_causal: bool = False,
     ) -> Tuple[torch.Tensor, LayerKVCache]:
         attn_out, new_cache = self.self_attn.forward_with_kv_cache(
             q_in=x, new_kv_in=x, cache=cache, mask=mask,
-            q_freqs=q_freqs, k_freqs=k_freqs,
+            q_freqs=q_freqs, k_freqs=k_freqs, is_causal=is_causal,
         )
         x = self.norm1(x + self.drop(attn_out))
         return self.norm2(x + self.drop(self.ff(x))), new_cache
@@ -452,8 +458,8 @@ class POPTransformer(nn.Module):
             self.sinusoidal = SinusoidalPositionalEncoding(d_model)
             rotary_emb = None
         elif pos_enc == "rotary":
-            from rotary_embedding_torch import RotaryEmbedding
-            rotary_emb = RotaryEmbedding(dim=(d_model // n_heads) // 2)
+            from utils.rope import RotaryPositionEmbedding
+            rotary_emb = RotaryPositionEmbedding(dim=d_model // n_heads)
             self.rotary_emb = rotary_emb
             self.sinusoidal = None
         else:
@@ -514,14 +520,13 @@ class POPTransformer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute RoPE frequency tensors once per forward call.
-        Shared across all layers — callers must NOT pass seq_len to the
-        library so that frequencies are always derived from actual position
-        values rather than sequential slot indices (see _apply_rope note).
+        Generates frequencies for positions [0, max_pos] then indexes by actual
+        position values to support non-contiguous position sets (e.g. pred tokens).
+        Returns tensors of shape [T, 1, 1, d].
         """
-        return (
-            self.rotary_emb(q_positions.float()),
-            self.rotary_emb(k_positions.float()),
-        )
+        max_pos = int(max(q_positions.max().item(), k_positions.max().item()))
+        all_freqs = self.rotary_emb(max_pos + 1)  # [max_pos+1, 1, 1, d]
+        return all_freqs[q_positions], all_freqs[k_positions]
 
     # ══════════════════════════════════════════════════════════════════
     # SHARED CORE METHODS  (position-encoded x already prepared by callers)
@@ -536,13 +541,12 @@ class POPTransformer(nn.Module):
         Returns (hidden_states [B, T, D], KVCache).
         """
         T, device = x.shape[1], x.device
-        causal = torch.tril(torch.ones(T, T, dtype=torch.bool, device=device))
         q_freqs, k_freqs = self._rope_freqs(positions, positions) if self.pos_enc == "rotary" else (None, None)
 
         layer_caches: List[LayerKVCache] = []
         for layer in self.layers:
             x, lc = layer.forward_with_kv_cache(
-                x, cache=None, mask=causal, q_freqs=q_freqs, k_freqs=k_freqs,
+                x, cache=None, mask=None, q_freqs=q_freqs, k_freqs=k_freqs, is_causal=True,
             )
             layer_caches.append(lc)
         return x, KVCache(layer_caches, n=self.n_obs, m=self.n_act)
@@ -733,7 +737,7 @@ class POPTransformer(nn.Module):
         pred_x: torch.Tensor,              # [B, n, D]    pred tokens, pos enc already applied
         q_positions: Optional[torch.Tensor],  # [n+m+n] for RoPE Q (None for sinusoidal)
         k_positions: Optional[torch.Tensor],  # [T_ctx+n+m+n] for RoPE K (None for sinusoidal)
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[KVCache, torch.Tensor]:
         """
         Single-pass: encode [obs|act] into the cache AND run prediction tokens.
 
@@ -804,7 +808,7 @@ class POPTransformer(nn.Module):
         n = self.n_obs
         B = context_cache.layers[0].k.shape[0]
         x = self._pred_pass_fn(k, context_cache, device)
-        return self.obs_head(x.view(B, k, n, self.d_model))
+        return self.obs_head(x.view(B, k, n, self.d_model).contiguous())
 
     def forward(
         self,
@@ -978,9 +982,8 @@ class POPTransformer(nn.Module):
     def append_block_embs_and_predict_latents(
         self,
         cache: KVCache,
-        obs_emb: torch.Tensor,  # [B, n, D]
-        act_emb: torch.Tensor,  # [B, m, D]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        new_block_emb: torch.Tensor,  # [B, n+m, D]
+    ) -> Tuple[KVCache, torch.Tensor]:
         """
         Like append_block_and_predict but accepts pre-computed embeddings.
         Combined: append [obs_emb|act_emb] to cache and run the next prediction pass.
@@ -988,11 +991,11 @@ class POPTransformer(nn.Module):
         """
         T_ctx  = cache.context_len
         n, m   = self.n_obs, self.n_act
-        device = obs_emb.device
-        B      = obs_emb.shape[0]
+        device = new_block_emb.device
+        B      = new_block_emb.shape[0]
 
         block_pos   = torch.arange(T_ctx, T_ctx + n + m, device=device)
-        new_block_x = torch.cat([obs_emb, act_emb], dim=1).clone()
+        new_block_x = new_block_emb
         if self.pos_enc == "sinusoidal":
             new_block_x = new_block_x + self.sinusoidal(block_pos).unsqueeze(0)
 

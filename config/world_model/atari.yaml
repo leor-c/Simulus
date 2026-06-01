@@ -20,6 +20,7 @@ transformer:
   blocks_per_chunk: 5
   pos_enc: rotary
   pred_self_mask: causal
+  pred_pass_mode: batched
 context_length: 2
 compute_states_parallel: True
 shared_embeddings: True

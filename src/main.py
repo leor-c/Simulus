@@ -1,3 +1,6 @@
+import faulthandler
+faulthandler.enable()
+import os
 import multiprocessing
 from collections import defaultdict
 from functools import partial
@@ -18,6 +21,8 @@ import torch.nn as nn
 # torch._dynamo.config.suppress_errors = True
 # torch.backends.cuda.enable_flash_sdp(False)
 # torch.backends.cuda.enable_mem_efficient_sdp(False)
+# torch.backends.cuda.enable_cudnn_sdp(False)
+# torch.backends.cudnn.allow_tf32 = False
 # from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 # allow_ops_in_compiled_graph()
 from tqdm import tqdm
@@ -39,7 +44,8 @@ from models.world_model import POPWorldModel
 from models.tokenizer import MultiModalTokenizer, DummyTokenizer
 from utils import (
     configure_optimizer, set_seed, GradNormInfo, TokenizerInfoHandler,
-    TrainerInfoHandler, ControllerInfoHandler, ObsModality
+    TrainerInfoHandler, ControllerInfoHandler, ObsModality,
+    TrainingDisplay, print_collector_log,
 )
 from dataset import get_dataloader, CuriousReplayDistribution, EpisodeDirManager, NpCuriousReplayDistribution
 
@@ -297,13 +303,14 @@ class Trainer:
         logger.info(f'{sum(p.numel() for p in self.agent.actor_critic.parameters())} parameters in agent.actor_critic')
 
         self.optimizer_world_model = configure_optimizer(self.agent.world_model, cfg.training.world_model.learning_rate, cfg.training.world_model.weight_decay)
+        # self.optimizer_world_model = torch.optim.AdamW(self.agent.world_model.parameters(), lr=cfg.training.world_model.learning_rate, weight_decay=cfg.training.world_model.weight_decay)
         self.optimizer_actor_critic = torch.optim.AdamW(self.agent.actor_critic.parameters(), lr=cfg.training.actor_critic.learning_rate)
 
         self.actor_critic_info_handler = ControllerInfoHandler()
 
         uniform_fraction = cfg.training.world_model.replay_sampling_uniform_fraction
         if uniform_fraction < 1.0:
-            self.wm_crd = CuriousReplayDistribution(uniform_portion=uniform_fraction, device=self.device)
+            self.wm_crd = NpCuriousReplayDistribution(uniform_portion=uniform_fraction)
         else:
             self.wm_crd = None
 
@@ -316,53 +323,56 @@ class Trainer:
             self.train_dataset.load_disk_checkpoint(dataset_path)
 
         self.run_metadata = RunMetadata()
+        self.display = TrainingDisplay(mode=cfg.common.display_mode)
 
         if cfg.common.resume:
             self.load_checkpoint()
 
     def run(self) -> None:
-        for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
-            self.run_metadata.epoch = epoch
-            logger.info(f"\nEpoch {epoch} / {self.cfg.common.epochs}\n")
-            start_time = time.time()
-            to_log = []
+        with self.display:
+            for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
+                self.run_metadata.epoch = epoch
+                self.display.start_epoch(epoch, self.cfg.common.epochs)
+                start_time = time.time()
+                to_log = []
 
-            if self.cfg.training.should:
-                if epoch <= self.cfg.collection.train.stop_after_epochs:
-                    self.agent.eval()
-                    collector_log = self.train_collector.collect(self.agent, epoch, **self.cfg.collection.train.config)
-                    to_log += collector_log
-                    logger.info(collector_log)
+                if self.cfg.training.should:
+                    if epoch <= self.cfg.collection.train.stop_after_epochs:
+                        self.agent.eval()
+                        collector_log = self.train_collector.collect(self.agent, epoch, **self.cfg.collection.train.config, display=self.display)
+                        to_log += collector_log
+                        self.display.show_collector(collector_log)
+                    else:
+                        if self.agent.world_model.enable_curiosity:
+                            self.agent.world_model.enable_curiosity = False
                 to_log += self.train_agent(epoch)
 
-            if self.cfg.evaluation.should and (epoch % self.cfg.evaluation.every == 0) and (epoch >= self.cfg.training.tokenizer.start_after_epochs):
-                self.test_dataset.clear()
-                self.test_collector.reset()
+                if self.cfg.evaluation.should and (epoch % self.cfg.evaluation.every == 0) and (epoch >= self.cfg.training.tokenizer.start_after_epochs):
+                    self.test_dataset.clear()
+                    self.test_collector.reset()
 
-                collection_kwargs = {**self.cfg.collection.test.config}
-                kw_to_del = 'num_episodes_end' if 'num_episodes' in collection_kwargs else 'num_steps_end'
+                    collection_kwargs = {**self.cfg.collection.test.config}
+                    kw_to_del = 'num_episodes_end' if 'num_episodes' in collection_kwargs else 'num_steps_end'
+                    del collection_kwargs[kw_to_del]
 
-                del collection_kwargs[kw_to_del]
+                    test_collect_log = self.test_collector.collect(self.agent, epoch, **collection_kwargs, display=self.display)
+                    to_log += test_collect_log
+                    self.display.show_collector(test_collect_log)
 
-                test_collect_log = self.test_collector.collect(self.agent, epoch, **collection_kwargs)
-                to_log += test_collect_log
-                logger.info(test_collect_log)
+                    self.run_metadata.update_eval_score(test_collect_log[-1]['test_dataset/return'])
+                    self.display.update_info(f"Best epoch {self.run_metadata.epoch_of_best_score}, best score: {self.run_metadata.best_eval_score}")
 
-                self.run_metadata.update_eval_score(test_collect_log[-1]['test_dataset/return'])
-                logger.info(f"Best epoch {self.run_metadata.epoch_of_best_score}, best score: {self.run_metadata.best_eval_score}")
+                    eval_log = self.eval_agent(epoch)
+                    to_log += eval_log
 
-                eval_log = self.eval_agent(epoch)
-                to_log += eval_log
-                logger.info(eval_log)
+                if self.cfg.training.should and epoch % self.cfg.evaluation.every == 0:
+                    keep_agent_only = self.cfg.common.metrics_only_mode or (not self.cfg.common.do_checkpoint)
+                    self.save_checkpoint(save_agent_only=keep_agent_only)
 
-            if self.cfg.training.should and epoch % self.cfg.evaluation.every == 0:  # and not self.cfg.common.metrics_only_mode:
-                keep_agent_only = self.cfg.common.metrics_only_mode or (not self.cfg.common.do_checkpoint)
-                self.save_checkpoint(save_agent_only=keep_agent_only)
-
-            to_log.append({'duration': (time.time() - start_time)})
-            logger.info(to_log[-1])
-            for metrics in to_log:
-                wandb.log({'epoch': epoch, **metrics})
+                to_log.append({'duration': (time.time() - start_time)})
+                self.display.end_epoch(status=f"done in {to_log[-1]['duration']:.1f}s")
+                for metrics in to_log:
+                    wandb.log({'epoch': epoch, **metrics})
 
         self.final_eval()
         self.finish()
@@ -383,7 +393,7 @@ class Trainer:
 
         test_collect_log = self.test_collector.collect(self.agent, epoch, **collection_kwargs)
 
-        logger.info(test_collect_log)
+        print_collector_log(test_collect_log)
         for metrics in test_collect_log:
             wandb.log({'epoch': epoch, **metrics})
 
@@ -409,7 +419,7 @@ class Trainer:
                     info_handler=self.tokenizer_info_handler,
                     **cfg_tokenizer
                 )
-                logger.info(metrics_tokenizer)
+                self.display.update_metrics(metrics_tokenizer)
             self.agent.tokenizer.eval()
 
         if epoch > cfg_world_model.start_after_epochs:
@@ -424,7 +434,7 @@ class Trainer:
                 replay_dist=self.wm_crd,
                 **cfg_world_model
             )
-            logger.info(metrics_world_model)
+            self.display.update_metrics(metrics_world_model)
         self.agent.world_model.eval()
 
         critic_start = cfg_actor_critic.start_after_epochs
@@ -443,7 +453,7 @@ class Trainer:
                 info_handler=self.actor_critic_info_handler,
                 **cfg_actor_critic
             )
-            logger.info(metrics_actor_critic)
+            self.display.update_metrics(metrics_actor_critic)
         self.agent.actor_critic.eval()
 
         return [{**metrics_tokenizer, **metrics_world_model, **metrics_actor_critic}]
@@ -452,7 +462,7 @@ class Trainer:
             self, epoch: int, component: nn.Module, optimizer: torch.optim.Optimizer, steps_per_epoch: int,
             batch_num_samples: int, grad_acc_steps: int, max_grad_norm: Optional[float],
             sequence_length: int, sample_from_start: bool, context_len: int, info_handler: TrainerInfoHandler = None,
-            replay_dist: Optional[CuriousReplayDistribution] = None, **kwargs_loss: Any
+            replay_dist: Optional[NpCuriousReplayDistribution] = None, **kwargs_loss: Any
     ) -> Dict[str, float]:
         loss_total_epoch = 0.0
         intermediate_losses = defaultdict(float)
@@ -475,27 +485,39 @@ class Trainer:
         )
 
         data_iter = iter(dataloader)
-        for _ in tqdm(range(steps_per_epoch), desc=f"Training {str(component)}", file=sys.stdout):
-            optimizer.zero_grad()
-            for _ in range(grad_acc_steps):
-                try:
-                    batch = next(data_iter)
-                except StopIteration:
-                    data_iter = iter(dataloader)
-                    batch = next(data_iter)
 
-                assert (batch['mask_padding'].sum(dim=1) > context_len).all()
-                batch = self._to_device(batch)
+        def _fetch_batch():
+            nonlocal data_iter
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                batch = next(data_iter)
+
+            return batch
+
+        def _checked_to_device(batch):
+            assert (batch['mask_padding'].sum(dim=1) > context_len).all()
+            return self._to_device(batch)
+
+        task = self.display.add_task(f"Training {component}", total=steps_per_epoch)
+        for i in range(steps_per_epoch):
+            optimizer.zero_grad()
+            step_loss = 0.0
+            for _ in range(grad_acc_steps):
+                batch = _checked_to_device(_fetch_batch())
 
                 losses, info = component.compute_loss(batch, epoch=epoch, num_epochs=self.cfg.common.epochs, **kwargs_loss)
 
                 if replay_dist is not None:
                     assert 'per_sample_loss' in info
-                    replay_dist.update_losses(info['per_sample_loss'].detach())
+                    replay_dist.update_losses(info['per_sample_loss'].detach().cpu().numpy())
 
                 losses = losses / grad_acc_steps
                 loss_total_step = losses.loss_total
                 loss_total_step.backward()
+                torch.cuda.synchronize()
+                step_loss += loss_total_step.item()
                 loss_total_epoch += loss_total_step.item() / steps_per_epoch
 
                 if info_handler is not None:
@@ -509,8 +531,10 @@ class Trainer:
             )
             grad_norms_info(grad_norm)
 
-
-            optimizer.step()
+            if torch.isfinite(grad_norm):
+                optimizer.step()
+            torch.cuda.synchronize()
+            self.display.update_task(task, advance=1, metrics=f"loss={step_loss:.4f}  grad_norm={grad_norm.item():.3f}")
 
         epoch_info = {}
         if info_handler is not None:
@@ -566,7 +590,6 @@ class Trainer:
         intermediate_losses = defaultdict(float)
 
         steps = 0
-        pbar = tqdm(desc=f"Evaluating {str(component)}", file=sys.stdout)
         dataloader = get_dataloader(
                 self.test_dataset,
                 context_length,
@@ -578,6 +601,7 @@ class Trainer:
             )
         num_batches = int(np.ceil(len(dataloader) / sequence_length)) if len(dataloader) > sequence_length else len(dataloader)
         data_iter = iter(dataloader)
+        task = self.display.add_task(f"Evaluating {component}", total=num_batches)
         for batch_i in range(num_batches):
             batch = next(data_iter)
             assert (batch['mask_padding'].sum(dim=1) > context_length).all()
@@ -590,7 +614,7 @@ class Trainer:
                 intermediate_losses[f"{str(component)}/eval/{loss_name}"] += loss_value
 
             steps += 1
-            pbar.update(1)
+            self.display.update_task(task, advance=1)
 
         if steps == 0:
             return {}

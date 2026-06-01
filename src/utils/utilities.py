@@ -14,15 +14,18 @@ import torch
 import torch.nn as nn
 import wandb
 from loguru import logger
-class FreqDist(Counter):
-    """Minimal Counter subclass replacing nltk.FreqDist. .B() returns unique-bin count."""
-    def B(self) -> int:
-        return len(self)
+
 from torch import Tensor
 import torch.nn.functional as F
 
 from utils.math import sym_log, sym_exp
 from utils.types import ObsModality
+
+
+class FreqDist(Counter):
+    """Minimal Counter subclass replacing nltk.FreqDist. .B() returns unique-bin count."""
+    def B(self) -> int:
+        return len(self)
 
 
 def configure_optimizer(model, learning_rate, weight_decay):
