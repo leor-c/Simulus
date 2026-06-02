@@ -12,4 +12,4 @@
 source ~/.bashrc
 conda activate sim
 
-python src/main.py benchmark=atari common.display_mode=disabled "$@"
+python src/main.py benchmark=atari common.display_mode=disabled wandb.mode=offline "$@"
