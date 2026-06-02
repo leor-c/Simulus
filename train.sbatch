@@ -3,8 +3,8 @@
 #SBATCH --output=outputs/slurm/%j.out
 #SBATCH --error=outputs/slurm/%j.err
 #SBATCH --time=36:00:00
-#SBATCH --partition=part-preempt
-#SBATCH --qos=qos-preempt
+#SBATCH --partition=part-shie
+#SBATCH --qos=qos-shie
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
