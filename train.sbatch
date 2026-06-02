@@ -4,8 +4,7 @@
 #SBATCH --error=outputs/slurm/%j.err
 #SBATCH --time=36:00:00
 #SBATCH --partition=part-preempt
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --qos=qos-preempt
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
