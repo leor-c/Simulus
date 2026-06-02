@@ -10,6 +10,7 @@
 #SBATCH --gres=gpu:1
 
 source ~/.bashrc
+source ~/miniforge3/etc/profile.d/conda.sh
 conda activate sim
 
 python src/main.py benchmark=atari common.display_mode=disabled wandb.mode=offline "$@"
