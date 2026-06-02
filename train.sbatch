@@ -13,6 +13,4 @@
 source ~/.bashrc
 conda activate sim
 
-cd $SLURM_SUBMIT_DIR
-
-python src/main.py benchmark=atari common.display_mode=disabled
+python src/main.py benchmark=atari common.display_mode=disabled "$@"
