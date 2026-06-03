@@ -165,7 +165,8 @@ class Collector:
 
                 self.obs, _ = self.env.reset()
                 self.episode_ids = [None] * self.env.num_envs
-                agent.actor_critic.reset(n=self.env.num_envs)
+                with torch.autocast(agent.device.type, dtype=torch.bfloat16, enabled=agent.use_bf16_autocast):
+                    agent.actor_critic.reset(n=self.env.num_envs)
                 observations, actions, rewards, dones = [], [], [], []
 
         # Add incomplete episodes to dataset, and complete them later.
@@ -173,7 +174,8 @@ class Collector:
             infos = self.info if self.env.num_envs > 1 else [self.info]
             self.add_experience_to_dataset(observations, actions, rewards, dones, infos)
 
-        agent.actor_critic.clear()
+        with torch.autocast(agent.device.type, dtype=torch.bfloat16, enabled=agent.use_bf16_autocast):
+            agent.actor_critic.clear()
 
         if len(info_avg) > 0:
             episode_info = {f'{self.dataset.name}/{k}': np.mean(v) for k, v in info_avg.items()}

@@ -166,9 +166,8 @@ class ActorCriticLS(nn.Module):
     def process_action_emb(self, ac_action_embs: tuple[Tensor, Tensor], mask_padding: Tensor = None):
         assert (
             self.include_action_inputs and ac_action_embs[0].dim() == 2 and
-            (not self.separate_networks or ac_action_embs[1].dim() == 2),
-            f"Got {ac_action_embs[0].dim()} ({ac_action_embs[0].shape})"
-        )
+            (not self.separate_networks or ac_action_embs[1].dim() == 2)
+        ), f"Got {ac_action_embs[0].dim()} ({ac_action_embs[0].shape})"
         self.actor_state = self._rnn_forward(ac_action_embs[0], mask_padding, self.actor, self.actor_state)
         self.critic_state = self._rnn_forward(ac_action_embs[1], mask_padding, self.critic, self.critic_state)
 
@@ -209,19 +208,28 @@ class ActorCriticLS(nn.Module):
             # Shared actor-critic network
             return None
 
-        if mask_padding is None:
-            rnn_state = model(x, rnn_state)
-        else:
+        # Keep recurrent state updates in the state dtype. Autocast may make the
+        # RNN output bf16, which cannot be assigned back into fp32 hidden state.
+        with torch.autocast(device_type=x.device.type, enabled=False):
             if self.rnn_type == 'lstm':
                 hx, cx = rnn_state
+                rnn_dtype = hx.dtype if hx is not None else next(model.parameters()).dtype
+                x = x.to(dtype=rnn_dtype)
+                if mask_padding is None:
+                    return model(x, rnn_state)
+
                 hx[mask_padding], cx[mask_padding] = model(x[mask_padding], (hx[mask_padding], cx[mask_padding]))
-                rnn_state = (hx, cx)
-            
-            elif self.rnn_type == 'gru':
-                rnn_state[mask_padding] = model(x, rnn_state[mask_padding])
-            else:
-                assert False, f"rnn type '{self.rnn_type}' not supported"
-        return rnn_state
+                return hx, cx
+
+            if self.rnn_type == 'gru':
+                x = x.to(dtype=rnn_state.dtype)
+                if mask_padding is None:
+                    return model(x, rnn_state)
+
+                rnn_state[mask_padding] = model(x[mask_padding], rnn_state[mask_padding])
+                return rnn_state
+
+            assert False, f"rnn type '{self.rnn_type}' not supported"
 
     def rnn_forward(self, x, mask_padding):
         self.actor_state = self._rnn_forward(x, mask_padding, self.actor, self.actor_state)

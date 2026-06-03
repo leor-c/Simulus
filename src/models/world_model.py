@@ -525,11 +525,11 @@ class POPWorldModel(nn.Module):
         """
         assert isinstance(self._model, POPTransformer)
         block_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if cache is None:
-                _, cache = self._model.encode_embs_to_kv_cache(block_emb)
-            else:
-                cache = self._model.append_block_embs(cache, block_emb)
+
+        if cache is None:
+            _, cache = self._model.encode_embs_to_kv_cache(block_emb)
+        else:
+            cache = self._model.append_block_embs(cache, block_emb)
         return cache
 
     @torch.no_grad()
@@ -548,8 +548,8 @@ class POPWorldModel(nn.Module):
         assert self.backbone == 'transformer' and isinstance(self._model, POPTransformer)
         n = self.tokens_per_obs
         block_emb = rearrange(tokens_emb, 'b t k1 e -> b (t k1) e')   # [B, n+m, E]
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            return self._model.append_block_embs_and_predict_latents(cache, block_emb)
+
+        return self._model.append_block_embs_and_predict_latents(cache, block_emb)
 
     def compute_next_obs_pred_latents(self, recurrent_state: Union[RecurrentState, TransformerKVCache, None]):
         if self.backbone == 'transformer':

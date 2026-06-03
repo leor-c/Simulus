@@ -12,11 +12,15 @@ from utils.types import MultiModalObs, ObsModality
 
 
 class Agent(nn.Module):
-    def __init__(self, tokenizer: MultiModalTokenizer, world_model: POPWorldModel, actor_critic: ActorCriticLS):
+    def __init__(
+            self, tokenizer: MultiModalTokenizer, world_model: POPWorldModel, actor_critic: ActorCriticLS,
+            use_bf16_autocast: bool = False
+    ):
         super().__init__()
         self.tokenizer = tokenizer
         self.world_model = world_model
         self.actor_critic = actor_critic
+        self.use_bf16_autocast = use_bf16_autocast
 
     @property
     def device(self):
@@ -33,28 +37,30 @@ class Agent(nn.Module):
 
     def act(self, obs: MultiModalObs, should_sample: bool = True, temperature: float = 1.0) ->Tensor:
         assert isinstance(self.actor_critic, ActorCriticLS)
-        input_ac = self._embed_obs(obs)
-        actions_dist = self.actor_critic(inputs=input_ac)[0].get_actions_distributions(temperature)
-        action = actions_dist.sample()[:, -1] if should_sample else actions_dist.mode[:, -1]
-        if self.actor_critic.include_action_inputs:
-            self.actor_critic.process_action(action)
+        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.use_bf16_autocast):
+            input_ac = self._embed_obs(obs)
+            actions_dist = self.actor_critic(inputs=input_ac)[0].get_actions_distributions(temperature)
+            action = actions_dist.sample()[:, -1] if should_sample else actions_dist.mode[:, -1]
+            if self.actor_critic.include_action_inputs:
+                self.actor_critic.process_action(action)
         return action
 
     def reset_actor_critic(self, n, burnin_observations: MultiModalObs, mask_padding, actions=None):
         assert isinstance(self.actor_critic, ActorCriticLS)
-        b_o = burnin_observations
-        if burnin_observations is not None:
-            b_o = self._embed_obs(burnin_observations)
+        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.use_bf16_autocast):
+            b_o = burnin_observations
+            if burnin_observations is not None:
+                b_o = self._embed_obs(burnin_observations)
 
-        ac_actions_embs = None
-        if actions is not None:
-            assert actions.dim() in [2, 3]
-            # actions_emb = self.world_model.action_embeddings(actions)
-            ac_actions_embs = self.actor_critic.embed_action(actions)
-            for actions_emb in ac_actions_embs:
-                assert actions_emb is None or actions_emb.dim() == 3, f"Got {actions_emb.dim()}"
+            ac_actions_embs = None
+            if actions is not None:
+                assert actions.dim() in [2, 3]
+                # actions_emb = self.world_model.action_embeddings(actions)
+                ac_actions_embs = self.actor_critic.embed_action(actions)
+                for actions_emb in ac_actions_embs:
+                    assert actions_emb is None or actions_emb.dim() == 3, f"Got {actions_emb.dim()}"
 
-        return self.actor_critic.reset(n=n, burnin_observations=b_o, mask_padding=mask_padding, ac_actions_embs=ac_actions_embs)
+            return self.actor_critic.reset(n=n, burnin_observations=b_o, mask_padding=mask_padding, ac_actions_embs=ac_actions_embs)
 
     def _embed_obs(self, obs: MultiModalObs):
         encoded = self.tokenizer.encode(obs, should_preprocess=True)

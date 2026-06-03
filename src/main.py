@@ -221,7 +221,7 @@ def build_agent(env, cfg, device):
     # world_model.compile()
     # actor_critic.compile()
 
-    return Agent(tokenizer, world_model, actor_critic)
+    return Agent(tokenizer, world_model, actor_critic, use_bf16_autocast=cfg.common.use_bf16_autocast)
 
 
 class Trainer:
@@ -240,7 +240,10 @@ class Trainer:
 
         # torch.autograd.set_detect_anomaly(True)
         torch.set_printoptions(profile='short', sci_mode=False)
-        # torch.set_float32_matmul_precision(cfg.common.float32_matmul_precision)
+        torch.set_float32_matmul_precision(cfg.common.float32_matmul_precision)
+        # "highest" keeps full fp32 matmul/conv behavior; "high"/"medium" allow TF32 for faster fp32 CUDA kernels.
+        torch.backends.cuda.matmul.allow_tf32 = cfg.common.float32_matmul_precision != 'highest'
+        torch.backends.cudnn.allow_tf32 = cfg.common.float32_matmul_precision != 'highest'
 
         if cfg.common.seed is not None:
             set_seed(cfg.common.seed)
@@ -507,7 +510,8 @@ class Trainer:
             for _ in range(grad_acc_steps):
                 batch = _checked_to_device(_fetch_batch())
 
-                losses, info = component.compute_loss(batch, epoch=epoch, num_epochs=self.cfg.common.epochs, **kwargs_loss)
+                with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.cfg.common.use_bf16_autocast):
+                    losses, info = component.compute_loss(batch, epoch=epoch, num_epochs=self.cfg.common.epochs, **kwargs_loss)
 
                 if replay_dist is not None:
                     assert 'per_sample_loss' in info

@@ -40,6 +40,7 @@ common:
   seed: 1
   sequence_length: ${world_model.max_blocks}
   resume: False # set by resume.sh script only.
+  use_bf16_autocast: False
   float32_matmul_precision: 'highest'
   num_dataloader_workers: 0
   display_mode: "persistent"  # "per_epoch" | "persistent" | "disabled"
