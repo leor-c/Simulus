@@ -50,6 +50,18 @@ from utils import (
 from dataset import get_dataloader, CuriousReplayDistribution, EpisodeDirManager, NpCuriousReplayDistribution
 
 
+def get_driver_version():
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "N/A"
+
+
 Env = Union[SingleProcessEnv, MultiProcessEnv]
 
 
@@ -231,8 +243,22 @@ class Trainer:
         self.test_env = test_env
         assert self.train_env is not None or self.test_env is not None
 
+        wandb_config = OmegaConf.to_container(cfg, resolve=True)
+        wandb_config["system"] = {
+            "pytorch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "cudnn_version": torch.backends.cudnn.version(),
+            "gpu_name": torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else "N/A",
+            "gpu_count": torch.cuda.device_count(),
+            "gpu_driver_version": get_driver_version(),
+            "gpu_memory_gb": round(
+                torch.cuda.get_device_properties(0).total_memory / 1e9,
+                2
+                ) if torch.cuda.is_available() else 0,
+        }
+
         wandb.init(
-            config=OmegaConf.to_container(cfg, resolve=True),
+            config=wandb_config,
             reinit=True,
             resume=True,
             **cfg.wandb
