@@ -29,7 +29,7 @@ from tqdm import tqdm
 import wandb
 from loguru import logger
 
-from async_evaluator import AsyncEvaluator, EvalResult
+from async_evaluator import AsyncEvaluator, ConsoleEvent, EvalResult
 from agent import Agent
 from collector import Collector
 from envs import SingleProcessEnv, MultiProcessEnv
@@ -352,6 +352,7 @@ class Trainer:
     def run(self) -> None:
         with self.display:
             for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
+                self.handle_async_console_events(self.async_evaluator.poll_console() if self.async_evaluator is not None else [])
                 self.handle_async_eval_results(self.async_evaluator.poll() if self.async_evaluator is not None else [])
                 self.run_metadata.epoch = epoch
                 self.display.start_epoch(epoch, self.cfg.common.epochs)
@@ -372,6 +373,7 @@ class Trainer:
                 if self.cfg.evaluation.should and (epoch % self.cfg.evaluation.every == 0) and (epoch >= self.cfg.training.tokenizer.start_after_epochs):
                     if self.is_async_eval_enabled:
                         assert self.async_evaluator is not None
+                        self.handle_async_console_events(self.async_evaluator.poll_console())
                         self.handle_async_eval_results(self.async_evaluator.poll())
                         self.async_evaluator.dispatch(epoch)
                     else:
@@ -402,10 +404,17 @@ class Trainer:
                 for metrics in to_log:
                     wandb.log({'epoch': epoch, **metrics})
 
-            self.handle_async_eval_results(self.async_evaluator.wait_for_pending() if self.async_evaluator is not None else [])
+            if self.async_evaluator is not None:
+                self.handle_async_eval_results(self.async_evaluator.wait_for_pending())
+                self.handle_async_console_events(self.async_evaluator.poll_console())
 
         self.final_eval()
         self.finish()
+
+    def handle_async_console_events(self, events: List[ConsoleEvent]) -> None:
+        for event in events:
+            style = 'yellow' if event.stream == 'stderr' else 'dim'
+            self.display.console.print(event.text, end='', markup=False, style=style)
 
     def handle_async_eval_results(self, results: List[EvalResult]) -> None:
         for result in results:
@@ -419,6 +428,25 @@ class Trainer:
 
             if result.final:
                 print_collector_log(result.metrics)
+            else:
+                collector_logs = [metrics for metrics in result.metrics if any(k.startswith('test_dataset/') for k in metrics)]
+                eval_metrics = {
+                    k: v
+                    for metrics in result.metrics
+                    for k, v in metrics.items()
+                    if '/eval/' in k
+                }
+                if collector_logs:
+                    collector_display_logs = [
+                        {
+                            **({'test_dataset/eval_epoch': result.epoch} if any('#' in k for k in metrics) else {}),
+                            **metrics,
+                        }
+                        for metrics in collector_logs
+                    ]
+                    self.display.show_collector(collector_display_logs)
+                if eval_metrics:
+                    self.display.update_metrics(eval_metrics)
 
             for metrics in result.metrics:
                 wandb.log({'epoch': result.epoch, **metrics})
@@ -441,9 +469,12 @@ class Trainer:
     def final_eval(self):
         if self.is_async_eval_enabled:
             assert self.async_evaluator is not None
+            self.handle_async_console_events(self.async_evaluator.poll_console())
             self.handle_async_eval_results(self.async_evaluator.wait_for_pending())
+            self.handle_async_console_events(self.async_evaluator.poll_console())
             self.async_evaluator.dispatch(self.run_metadata.epoch + 1, final=True)
             self.handle_async_eval_results(self.async_evaluator.wait_for_pending())
+            self.handle_async_console_events(self.async_evaluator.poll_console())
             return
 
         collection_kwargs = {**self.cfg.collection.test.config}
@@ -749,7 +780,11 @@ class Trainer:
 
     def save_checkpoint(self, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path('checkpoints_tmp')
-        shutil.copytree(src=self.ckpt_dir, dst=tmp_checkpoint_dir, ignore=shutil.ignore_patterns('dataset'))
+        shutil.copytree(
+            src=self.ckpt_dir,
+            dst=tmp_checkpoint_dir,
+            ignore=shutil.ignore_patterns('dataset', 'async_eval_console'),
+        )
         self._save_checkpoint(save_agent_only)
         shutil.rmtree(tmp_checkpoint_dir)
 
