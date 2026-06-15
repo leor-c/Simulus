@@ -395,9 +395,9 @@ class Trainer:
                         eval_log = self.eval_agent(epoch)
                         to_log += eval_log
 
-                if self.cfg.training.should and epoch % self.cfg.evaluation.every == 0:
-                    keep_agent_only = self.cfg.common.metrics_only_mode or (not self.cfg.common.do_checkpoint)
-                    self.save_checkpoint(save_agent_only=keep_agent_only)
+                skip_checkpoint = self.cfg.common.metrics_only_mode or (not self.cfg.common.do_checkpoint)
+                if self.cfg.training.should and (epoch % self.cfg.evaluation.every == 0) and (not skip_checkpoint):
+                    self.save_checkpoint(save_agent_only=False)
 
                 to_log.append({'duration': (time.time() - start_time)})
                 self.display.end_epoch(status=f"done in {to_log[-1]['duration']:.1f}s")
@@ -451,7 +451,7 @@ class Trainer:
             for metrics in result.metrics:
                 wandb.log({'epoch': result.epoch, **metrics})
 
-            if not self.cfg.common.metrics_only_mode and self.cfg.common.do_checkpoint:
+            if (not self.cfg.common.metrics_only_mode) and self.cfg.common.do_checkpoint:
                 torch.save(self.run_metadata.to_dict(), self.ckpt_dir / 'run_metadata.pt')
 
     def save_eval_snapshot(self, epoch: int) -> Path:
@@ -669,7 +669,7 @@ class Trainer:
         # if epoch > cfg_actor_critic.start_after_epochs:
         #     self.inspect_imagination(epoch)
 
-        if cfg_tokenizer.save_reconstructions and not self.cfg.common.metrics_only_mode and self.agent.tokenizer is not None and ObsModality.image in self.agent.tokenizer.modalities:
+        if cfg_tokenizer.save_reconstructions and (not self.cfg.common.metrics_only_mode) and (self.agent.tokenizer is not None) and (ObsModality.image in self.agent.tokenizer.modalities):
             dataloader = get_dataloader(
                 self.test_dataset,
                 1,
