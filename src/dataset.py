@@ -17,6 +17,7 @@ from episode import Episode
 from utils import ObsModality
 from utils.types import MultiModalObs
 from utils.preprocessing import ImageObsProcessor, TokenObsProcessor, VectorObsProcessor
+from utils.priority_tree import DynamicSoftmaxPriorityTree
 
 Batch = Dict[str, Union[torch.Tensor, MultiModalObs]]
 
@@ -545,26 +546,26 @@ def np_softmax(x, axis=-1):
 
 
 class NpCuriousReplayDistribution:
+    """
+    NumPy curious replay distribution backed by a dynamic softmax priority tree.
+
+    This preserves the same public replay API as NpCuriousReplayDistribution while
+    avoiding a full softmax over every sample on each prioritized draw.
+    """
+
     def __init__(
-            self, uniform_portion: float = 0.7, replacement: bool = False,
+            self, uniform_portion: float = 0.7, replacement: bool = False, seed: int | None = None,
     ):
+        assert 0.0 <= uniform_portion <= 1.0
         self.uniform_portion = uniform_portion
         self.replacement = replacement
-        self.counts = None
+        self.rng = np.random.default_rng(seed)
+
         self.losses = None
         self.last_sample = None
+        self.priority_tree = None
 
         self._loss_init_value = 10
-
-    @property
-    def distribution(self) -> np.ndarray:
-        losses_bonus = np_softmax(self.losses)
-
-        assert not np.isnan(losses_bonus).any(), f"got nan losses bonus: {losses_bonus}"
-        assert not np.isinf(losses_bonus).any(), f"got inf losses bonus: {losses_bonus}"
-        p = losses_bonus
-
-        return p
 
     @property
     def num_samples(self) -> int:
@@ -572,43 +573,112 @@ class NpCuriousReplayDistribution:
 
     def sample(self, batch_size: int) -> np.ndarray:
         assert self.num_samples > 0
-        replacement = False
+        assert batch_size >= 0
+        if not self.replacement:
+            assert batch_size <= self.num_samples
+
+        if batch_size == 0:
+            self.last_sample = np.empty(0, dtype=np.int64)
+            return self.last_sample
+
         prioritized_bsz = math.ceil((1 - self.uniform_portion) * batch_size)
-        dist = self.distribution
-        prioritized_sample = np.random.choice(dist.size, prioritized_bsz, replace=replacement, p=dist)
-        p = np.ones(dist.size)
-        p[prioritized_sample] = 0
-        p = p / p.sum()
-        uniform_sample = np.random.choice(dist.size, batch_size - prioritized_bsz, replace=replacement, p=p)
+
+        if self.replacement:
+            prioritized_sample = self._sample_prioritized_with_replacement(prioritized_bsz)
+            uniform_sample = self.rng.integers(
+                0,
+                self.num_samples,
+                size=batch_size - prioritized_bsz,
+                dtype=np.int64,
+            )
+        else:
+            prioritized_sample = self._sample_prioritized_without_replacement(prioritized_bsz)
+            remaining = np.setdiff1d(
+                np.arange(self.num_samples, dtype=np.int64),
+                prioritized_sample,
+                assume_unique=True,
+            )
+            uniform_sample = self.rng.choice(
+                remaining,
+                batch_size - prioritized_bsz,
+                replace=False,
+            ).astype(np.int64)
+
         sample = np.concatenate([prioritized_sample, uniform_sample], axis=0)
-        sample = np.random.permutation(sample)  # shuffle so that curiosity ensemble members will get random splits
+        sample = self.rng.permutation(sample).astype(np.int64)
 
         self.last_sample = sample
-        self.counts[sample] += 1
 
         return sample
+
+    def _sample_prioritized_with_replacement(self, batch_size: int) -> np.ndarray:
+        if batch_size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        indices, _ = self.priority_tree.sample_prioritized(batch_size)
+        return indices
+
+    def _sample_prioritized_without_replacement(self, batch_size: int) -> np.ndarray:
+        if batch_size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        selected = np.empty(batch_size, dtype=np.int64)
+        masked_leaves = np.empty(batch_size, dtype=np.int64)
+        masked_weights = np.empty(batch_size, dtype=self.priority_tree.dtype)
+        num_masked = 0
+
+        try:
+            for i in range(batch_size):
+                indices, _ = self.priority_tree.sample_prioritized(1)
+                index = indices[0]
+                leaf = self.priority_tree.tree_capacity + index
+
+                selected[i] = index
+                masked_leaves[i] = leaf
+                masked_weights[i] = self.priority_tree.tree[leaf]
+                num_masked += 1
+
+                self.priority_tree.tree[leaf] = 0
+                self.priority_tree._update_ancestors(np.asarray([leaf], dtype=np.int64))
+        finally:
+            if num_masked > 0:
+                masked_leaves = masked_leaves[:num_masked]
+                self.priority_tree.tree[masked_leaves] = masked_weights[:num_masked]
+                self.priority_tree._update_ancestors(masked_leaves)
+
+        return selected
 
     def update_num_samples(self, new_num_of_samples: int):
         assert new_num_of_samples >= self.num_samples
         if new_num_of_samples == self.num_samples:
             return
 
-        if self.counts is None:
-            self.counts = np.zeros(new_num_of_samples, dtype=np.int32)
-            self.losses = np.ones_like(self.counts, dtype=np.float32) * self._loss_init_value
+        new_losses = np.ones(
+            new_num_of_samples - self.num_samples,
+            dtype=np.float32,
+        ) * self._loss_init_value
 
+        if self.losses is None:
+            self.losses = new_losses
+            self.priority_tree = DynamicSoftmaxPriorityTree(
+                initial_capacity=new_num_of_samples,
+                seed=int(self.rng.integers(0, np.iinfo(np.int32).max)),
+            )
+            self.priority_tree.append(new_losses)
         else:
-            new_counts = np.zeros(new_num_of_samples - self.num_samples, dtype=np.int32)
-            new_losses = np.ones_like(new_counts, dtype=np.float32) * self._loss_init_value
-            self.counts = np.concatenate([self.counts, new_counts])
             self.losses = np.concatenate([self.losses, new_losses])
+            self.priority_tree.append(new_losses)
 
     def update_losses(self, batch_losses: np.ndarray):
+        batch_losses = np.asarray(batch_losses, dtype=np.float32).reshape(-1)
+
+        assert self.last_sample is not None, "sample must be called before update_losses"
+        assert batch_losses.size == self.last_sample.size
         assert not np.isnan(batch_losses).any(), f"got at least one 'nan' loss value: {batch_losses}"
         assert not np.isinf(batch_losses).any(), f"got at least one 'inf' loss value: {batch_losses}"
 
-        # device = self.losses[self.last_sample].device
         self.losses[self.last_sample] = batch_losses
+        self.priority_tree.update(self.last_sample, batch_losses)
 
 
 class CuriousReplayBatchSampler(torch.utils.data.Sampler):
@@ -721,4 +791,3 @@ def get_offline_dataloader(
     dataset_iter = torch.utils.data.DataLoader(combined_dataset, batch_size=batch_size, shuffle=shuffle)
 
     return dataset_iter
-
