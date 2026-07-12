@@ -7,7 +7,7 @@ from loguru import logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch._dynamo
+# import torch._dynamo
 import yet_another_retnet as yar
 import yet_another_retnet.retention
 from einops import rearrange, einsum

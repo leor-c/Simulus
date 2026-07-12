@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gymnasium.spaces
 import hydra
@@ -29,6 +29,7 @@ from tqdm import tqdm
 import wandb
 from loguru import logger
 
+from async_evaluator import AsyncEvaluator, ConsoleEvent, EvalResult
 from agent import Agent
 from collector import Collector
 from envs import SingleProcessEnv, MultiProcessEnv
@@ -72,7 +73,8 @@ def create_env(cfg_env: DictConfig, num_envs: int) -> Env:
 
 def create_run_envs(cfg: DictConfig) -> Tuple[Optional[Env], Optional[Env]]:
     train_env = create_env(cfg.env.train, cfg.collection.train.num_envs) if cfg.training.should else None
-    test_env = create_env(cfg.env.test, cfg.collection.test.num_envs) if cfg.evaluation.should else None
+    async_eval = cfg.evaluation.should and cfg.training.should and cfg.evaluation.async_eval.enabled
+    test_env = create_env(cfg.env.test, cfg.collection.test.num_envs) if cfg.evaluation.should and not async_eval else None
     return train_env, test_env
 
 
@@ -94,10 +96,10 @@ class RunMetadata:
         self.best_eval_score = best_eval_score
         self.epoch_of_best_score = epoch_of_best_score
 
-    def update_eval_score(self, score: float):
+    def update_eval_score(self, score: float, epoch: Optional[int] = None):
         if self.best_eval_score is None or score >= self.best_eval_score:
             self.best_eval_score = score
-            self.epoch_of_best_score = self.epoch
+            self.epoch_of_best_score = self.epoch if epoch is None else epoch
 
     @property
     def is_current_epoch_best(self):
@@ -115,7 +117,7 @@ def build_agent(env, cfg, device):
     try:
         project_root = Path(hydra.utils.get_original_cwd())
     except ValueError:
-        project_root = Path.cwd().parent
+        project_root = Path(os.environ.get('SIMULUS_ORIGINAL_CWD', Path.cwd()))
     is_continuous_env = isinstance(env.action_space, gymnasium.spaces.Box)
 
     tokenizers = {}
@@ -283,6 +285,7 @@ class Trainer:
         self.reconstructions_dir = self.media_dir / 'reconstructions'
 
         project_root = Path(hydra.utils.get_original_cwd())
+        os.environ['SIMULUS_ORIGINAL_CWD'] = str(project_root)
         if not cfg.common.resume:
             config_dir = Path('config')
             config_path = config_dir / f'base.yaml'
@@ -299,14 +302,14 @@ class Trainer:
 
         disable_saving = cfg.common.metrics_only_mode
         episode_manager_train = EpisodeDirManager(self.episode_dir / 'train', max_num_episodes=cfg.collection.train.num_episodes_to_save, disable_saving=disable_saving)
-        episode_manager_test = EpisodeDirManager(self.episode_dir / 'test', max_num_episodes=cfg.collection.test.num_episodes_to_save, disable_saving=disable_saving)
         self.episode_manager_imagination = EpisodeDirManager(self.episode_dir / 'imagination', max_num_episodes=cfg.evaluation.actor_critic.num_episodes_to_save, disable_saving=disable_saving)
 
         if self.cfg.training.should:
             self.train_dataset = instantiate(cfg.datasets.train)
             self.train_collector = Collector(self.train_env, self.train_dataset, episode_manager_train)
 
-        if self.cfg.evaluation.should:
+        if self.cfg.evaluation.should and not self.is_async_eval_enabled:
+            episode_manager_test = EpisodeDirManager(self.episode_dir / 'test', max_num_episodes=cfg.collection.test.num_episodes_to_save, disable_saving=disable_saving)
             self.test_dataset = instantiate(cfg.datasets.test)
             self.test_collector = Collector(self.test_env, self.test_dataset, episode_manager_test)
 
@@ -357,9 +360,26 @@ class Trainer:
         if cfg.common.resume:
             self.load_checkpoint()
 
+        self.async_evaluator = None
+        if self.is_async_eval_enabled:
+            self.async_evaluator = AsyncEvaluator(
+                cfg=self.cfg,
+                ckpt_dir=self.ckpt_dir,
+                media_dir=self.media_dir,
+                best_eval_score=self.run_metadata.best_eval_score,
+                epoch_of_best_score=self.run_metadata.epoch_of_best_score,
+                save_snapshot=self.save_eval_snapshot,
+            )
+
+    @property
+    def is_async_eval_enabled(self) -> bool:
+        return self.cfg.evaluation.should and self.cfg.training.should and self.cfg.evaluation.async_eval.enabled
+
     def run(self) -> None:
         with self.display:
             for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
+                self.handle_async_console_events(self.async_evaluator.poll_console() if self.async_evaluator is not None else [])
+                self.handle_async_eval_results(self.async_evaluator.poll() if self.async_evaluator is not None else [])
                 self.run_metadata.epoch = epoch
                 self.display.start_epoch(epoch, self.cfg.common.epochs)
                 start_time = time.time()
@@ -377,36 +397,112 @@ class Trainer:
                 to_log += self.train_agent(epoch)
 
                 if self.cfg.evaluation.should and (epoch % self.cfg.evaluation.every == 0) and (epoch >= self.cfg.training.tokenizer.start_after_epochs):
-                    self.test_dataset.clear()
-                    self.test_collector.reset()
+                    if self.is_async_eval_enabled:
+                        assert self.async_evaluator is not None
+                        self.handle_async_console_events(self.async_evaluator.poll_console())
+                        self.handle_async_eval_results(self.async_evaluator.poll())
+                        self.async_evaluator.dispatch(epoch)
+                    else:
+                        assert self.test_dataset is not None and self.test_collector is not None
+                        self.test_dataset.clear()
+                        self.test_collector.reset()
 
-                    collection_kwargs = {**self.cfg.collection.test.config}
-                    kw_to_del = 'num_episodes_end' if 'num_episodes' in collection_kwargs else 'num_steps_end'
-                    del collection_kwargs[kw_to_del]
+                        collection_kwargs = {**self.cfg.collection.test.config}
+                        kw_to_del = 'num_episodes_end' if 'num_episodes' in collection_kwargs else 'num_steps_end'
+                        del collection_kwargs[kw_to_del]
 
-                    test_collect_log = self.test_collector.collect(self.agent, epoch, **collection_kwargs, display=self.display)
-                    to_log += test_collect_log
-                    self.display.show_collector(test_collect_log)
+                        test_collect_log = self.test_collector.collect(self.agent, epoch, **collection_kwargs, display=self.display)
+                        to_log += test_collect_log
+                        self.display.show_collector(test_collect_log)
 
-                    self.run_metadata.update_eval_score(test_collect_log[-1]['test_dataset/return'])
-                    self.display.update_info(f"Best epoch {self.run_metadata.epoch_of_best_score}, best score: {self.run_metadata.best_eval_score}")
+                        self.run_metadata.update_eval_score(test_collect_log[-1]['test_dataset/return'], epoch=epoch)
+                        self.display.update_info(f"Best epoch {self.run_metadata.epoch_of_best_score}, best score: {self.run_metadata.best_eval_score}")
 
-                    eval_log = self.eval_agent(epoch)
-                    to_log += eval_log
+                        eval_log = self.eval_agent(epoch)
+                        to_log += eval_log
 
-                if self.cfg.training.should and epoch % self.cfg.evaluation.every == 0:
-                    keep_agent_only = self.cfg.common.metrics_only_mode or (not self.cfg.common.do_checkpoint)
-                    self.save_checkpoint(save_agent_only=keep_agent_only)
+                skip_checkpoint = self.cfg.common.metrics_only_mode or (not self.cfg.common.do_checkpoint)
+                if self.cfg.training.should and (epoch % self.cfg.evaluation.every == 0) and (not skip_checkpoint):
+                    self.save_checkpoint(save_agent_only=False)
 
                 to_log.append({'duration': (time.time() - start_time)})
                 self.display.end_epoch(status=f"done in {to_log[-1]['duration']:.1f}s")
                 for metrics in to_log:
                     wandb.log({'epoch': epoch, **metrics})
 
+            if self.async_evaluator is not None:
+                self.handle_async_eval_results(self.async_evaluator.wait_for_pending())
+                self.handle_async_console_events(self.async_evaluator.poll_console())
+
         self.final_eval()
         self.finish()
 
+    def handle_async_console_events(self, events: List[ConsoleEvent]) -> None:
+        for event in events:
+            style = 'yellow' if event.stream == 'stderr' else 'dim'
+            self.display.console.print(event.text, end='', markup=False, style=style)
+
+    def handle_async_eval_results(self, results: List[EvalResult]) -> None:
+        for result in results:
+            if result.error is not None:
+                raise RuntimeError(f"Async evaluator failed for epoch {result.epoch}:\n{result.error}")
+
+            self.run_metadata.best_eval_score = result.best_eval_score
+            self.run_metadata.epoch_of_best_score = result.epoch_of_best_score
+            if result.best_eval_score is not None:
+                self.display.update_info(f"Best epoch {result.epoch_of_best_score}, best score: {result.best_eval_score}")
+
+            if result.final:
+                print_collector_log(result.metrics)
+            else:
+                collector_logs = [metrics for metrics in result.metrics if any(k.startswith('test_dataset/') for k in metrics)]
+                eval_metrics = {
+                    k: v
+                    for metrics in result.metrics
+                    for k, v in metrics.items()
+                    if '/eval/' in k
+                }
+                if collector_logs:
+                    collector_display_logs = [
+                        {
+                            **({'test_dataset/eval_epoch': result.epoch} if any('#' in k for k in metrics) else {}),
+                            **metrics,
+                        }
+                        for metrics in collector_logs
+                    ]
+                    self.display.show_collector(collector_display_logs)
+                if eval_metrics:
+                    self.display.update_metrics(eval_metrics)
+
+            for metrics in result.metrics:
+                wandb.log({'epoch': result.epoch, **metrics})
+
+            if (not self.cfg.common.metrics_only_mode) and self.cfg.common.do_checkpoint:
+                torch.save(self.run_metadata.to_dict(), self.ckpt_dir / 'run_metadata.pt')
+
+    def save_eval_snapshot(self, epoch: int) -> Path:
+        snapshot_dir = self.ckpt_dir / 'eval_snapshots'
+        snapshot_dir.mkdir(exist_ok=True, parents=True)
+        snapshot_path = snapshot_dir / f'epoch_{epoch:08d}.pt'
+        tmp_path = snapshot_path.with_suffix('.tmp')
+        torch.save(
+            {k: v.detach().cpu() for k, v in self.agent.state_dict().items()},
+            tmp_path,
+        )
+        os.replace(tmp_path, snapshot_path)
+        return snapshot_path
+
     def final_eval(self):
+        if self.is_async_eval_enabled:
+            assert self.async_evaluator is not None
+            self.handle_async_console_events(self.async_evaluator.poll_console())
+            self.handle_async_eval_results(self.async_evaluator.wait_for_pending())
+            self.handle_async_console_events(self.async_evaluator.poll_console())
+            self.async_evaluator.dispatch(self.run_metadata.epoch + 1, final=True)
+            self.handle_async_eval_results(self.async_evaluator.wait_for_pending())
+            self.handle_async_console_events(self.async_evaluator.poll_console())
+            return
+
         collection_kwargs = {**self.cfg.collection.test.config}
         epoch = self.run_metadata.epoch + 1
 
@@ -599,7 +695,7 @@ class Trainer:
         # if epoch > cfg_actor_critic.start_after_epochs:
         #     self.inspect_imagination(epoch)
 
-        if cfg_tokenizer.save_reconstructions and not self.cfg.common.metrics_only_mode and self.agent.tokenizer is not None and ObsModality.image in self.agent.tokenizer.modalities:
+        if cfg_tokenizer.save_reconstructions and (not self.cfg.common.metrics_only_mode) and (self.agent.tokenizer is not None) and (ObsModality.image in self.agent.tokenizer.modalities):
             dataloader = get_dataloader(
                 self.test_dataset,
                 1,
@@ -687,7 +783,7 @@ class Trainer:
 
     def _save_checkpoint(self, save_agent_only: bool) -> None:
         torch.save(self.agent.state_dict(), self.ckpt_dir / 'last.pt')
-        if self.run_metadata.is_current_epoch_best:
+        if (not self.is_async_eval_enabled) and self.run_metadata.is_current_epoch_best:
             torch.save(self.agent.state_dict(), self.ckpt_dir / 'best.pt')
         if not save_agent_only:
             torch.save(self.run_metadata.to_dict(), self.ckpt_dir / 'run_metadata.pt')
@@ -701,7 +797,7 @@ class Trainer:
             ckpt_dataset_dir = self.ckpt_dir / 'dataset'
             ckpt_dataset_dir.mkdir(exist_ok=True, parents=False)
             self.train_dataset.update_disk_checkpoint(ckpt_dataset_dir)
-            if self.cfg.evaluation.should:
+            if self.cfg.evaluation.should and not self.is_async_eval_enabled:
                 if self.cfg.collection.test.store_dataset:
                     test_dataset_dir = self.ckpt_dir / 'test_dataset'
                     test_dataset_dir.mkdir(exist_ok=True, parents=False)
@@ -710,7 +806,11 @@ class Trainer:
 
     def save_checkpoint(self, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path('checkpoints_tmp')
-        shutil.copytree(src=self.ckpt_dir, dst=tmp_checkpoint_dir, ignore=shutil.ignore_patterns('dataset'))
+        shutil.copytree(
+            src=self.ckpt_dir,
+            dst=tmp_checkpoint_dir,
+            ignore=shutil.ignore_patterns('dataset', 'async_eval_console'),
+        )
         self._save_checkpoint(save_agent_only)
         shutil.rmtree(tmp_checkpoint_dir)
 
@@ -726,7 +826,7 @@ class Trainer:
         self.optimizer_world_model.load_state_dict(ckpt_opt['optimizer_world_model'])
         self.optimizer_actor_critic.load_state_dict(ckpt_opt['optimizer_actor_critic'])
         self.train_dataset.load_disk_checkpoint(self.ckpt_dir / 'dataset')
-        if self.cfg.evaluation.should:
+        if self.cfg.evaluation.should and not self.is_async_eval_enabled:
             self.test_dataset.num_seen_episodes = torch.load(self.ckpt_dir / 'num_seen_episodes_test_dataset.pt')
         logger.info(f'Successfully loaded model, optimizer and {len(self.train_dataset)} episodes from {self.ckpt_dir.absolute()}.')
 
@@ -743,6 +843,8 @@ class Trainer:
         return batch
 
     def finish(self) -> None:
+        if self.async_evaluator is not None:
+            self.async_evaluator.close()
         close_run_envs(self.train_env, self.test_env)
         wandb.finish()
 

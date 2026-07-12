@@ -106,6 +106,15 @@ training:
 evaluation:
   should: True
   every: 10
+  async_eval:
+    enabled: True
+    device: ${common.device}
+    start_method: spawn
+    max_pending_jobs: 1
+    keep_snapshots: False
+    console:
+      stdout: hidden   # "hidden" | "file" | "forward"
+      stderr: hidden  # "hidden" | "file" | "forward"
   tokenizer:
     batch_num_samples: ${training.tokenizer.batch_num_samples}
     start_after_epochs: ${training.tokenizer.start_after_epochs}
