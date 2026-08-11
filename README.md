@@ -20,7 +20,12 @@ Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Ma
 </div>
 
 
-
+## Updates
+ - Aug 2026:
+   - Introducing Simulus-A (Attention), which improves over Simulus with the following improvements:
+     - Extended POP to standard Attention (now default), resulting in a standard Transformer sequence model with KV cache at imagination.
+     - Implemented FSQ tokenization to replace the vanilla VQ-VAE (images).
+   - Simulus-A improves the average (5-seed) Atari Breakout scores from 149 (Simulus) to 319 (Simulus-A). Due to limited compute resources, we could not run the full evaluation. We will continue adding results as our resources allow.
 
 
 

@@ -1,0 +1,59 @@
+{
+    "Alien": [
+    ],
+    "Amidar": [
+    ],
+    "Assault": [
+    ],
+    "Asterix": [
+    ],
+    "BankHeist": [
+    ],
+    "BattleZone": [
+    ],
+    "Boxing": [
+    ],
+    "Breakout": [
+        357.125,
+        281.48077,
+        380.625,
+        354.13462,
+        283.92308
+    ],
+    "ChopperCommand": [
+    ],
+    "CrazyClimber": [
+    ],
+    "DemonAttack": [
+    ],
+    "Freeway": [
+    ],
+    "Frostbite": [
+    ],
+    "Gopher": [
+    ],
+    "Hero": [
+    ],
+    "Jamesbond": [
+    ],
+    "Kangaroo": [
+    ],
+    "Krull": [
+    ],
+    "KungFuMaster": [
+    ],
+    "MsPacman": [
+    ],
+    "Pong": [
+    ],
+    "PrivateEye": [
+    ],
+    "Qbert": [
+    ],
+    "RoadRunner": [
+    ],
+    "Seaquest": [
+    ],
+    "UpNDown": [
+    ]
+}
