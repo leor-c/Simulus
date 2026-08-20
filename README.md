@@ -174,6 +174,69 @@ outputs/env.id/YYYY-MM-DD/hh-mm-ss/
 
 The folder `results/data/` contains raw scores (for each game, and for each training run).
 
+Scores are five-seed means, rounded to two decimal places. `?` denotes a result that has not yet been evaluated.
+
+### Atari100K
+
+| Game | Simulus | Simulus-A |
+|---|---:|---:|
+| Alien | 687.18 | ? |
+| Amidar | 102.43 | ? |
+| Assault | 1,822.75 | ? |
+| Asterix | 1,369.10 | ? |
+| BankHeist | 347.06 | ? |
+| BattleZone | 13,262.00 | ? |
+| Boxing | 93.53 | ? |
+| Breakout | 148.86 | 319 |
+| ChopperCommand | 3,611.60 | ? |
+| CrazyClimber | 93,433.20 | ? |
+| DemonAttack | 4,787.64 | ? |
+| Freeway | 31.91 | ? |
+| Frostbite | 258.42 | ? |
+| Gopher | 4,363.24 | ? |
+| Hero | 7,466.80 | ? |
+| Jamesbond | 678.00 | ? |
+| Kangaroo | 6,656.00 | ? |
+| Krull | 6,677.30 | ? |
+| KungFuMaster | 31,705.40 | ? |
+| MsPacman | 1,282.70 | ? |
+| Pong | 19.86 | ? |
+| PrivateEye | 100.00 | ? |
+| Qbert | 2,425.60 | ? |
+| RoadRunner | 24,471.80 | ? |
+| Seaquest | 1,800.44 | ? |
+| UpNDown | 10,416.54 | ? |
+
+### DMC Proprio 500K
+
+| Environment | Simulus | Simulus-A |
+|---|---:|---:|
+| acrobot-swingup | 125.21 | ? |
+| ball_in_cup-catch | 960.48 | ? |
+| cartpole-balance | 993.44 | ? |
+| cartpole-balance_sparse | 999.81 | ? |
+| cartpole-swingup | 861.80 | ? |
+| cartpole-swingup_sparse | 798.11 | ? |
+| cheetah-run | 668.24 | ? |
+| finger-spin | 874.58 | ? |
+| finger-turn_easy | 881.88 | ? |
+| finger-turn_hard | 768.64 | ? |
+| hopper-hop | 271.48 | ? |
+| hopper-stand | 905.09 | ? |
+| pendulum-swingup | 832.17 | ? |
+| reacher-easy | 958.89 | ? |
+| reacher-hard | 843.70 | ? |
+| walker-run | 628.72 | ? |
+| walker-stand | 979.51 | ? |
+| walker-walk | 969.91 | ? |
+
+### Craftax 1M
+This table reports raw scores (% of max score).
+
+| Environment |       Simulus | Simulus-A |
+|---|--------------:|---:|
+| Craftax | 14.90 (6.59%) | ? |
+
 ## 👉 Citation
 ```
 @misc{cohen2025uncovering,
