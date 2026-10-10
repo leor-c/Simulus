@@ -1,6 +1,7 @@
 # Simulus: Combining Improvements in Sample-Efficient World Model Agents
 Lior Cohen ▪️ Kaixin Wang ▪️ Bingyi Kang ▪️ Uri Gadot ▪️ Shie Mannor
 
+[![Papers with Code: #3 on Atari 100k](https://paperswithcode.co/api/v1/papers/2502.11537/leaderboard-badge.svg?eval=13691&live=1)](https://paperswithcode.co/api/v1/papers/2502.11537/leaderboard-badge-link?eval=13691)
 
 📄 [Paper](https://arxiv.org/abs/2502.11537)   ▪️   🧠 [Trained model weights](https://huggingface.co/leorc/Simulus)
 
